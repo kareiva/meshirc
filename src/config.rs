@@ -28,6 +28,8 @@ struct FileConfig {
     auto_join: Option<Vec<String>>,
 }
 
+pub const DEFAULT_PORT: &str = if cfg!(windows) { "COM3" } else { "/dev/ttyACM0" };
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: String,
@@ -51,7 +53,7 @@ impl Config {
         };
         let data_dir = dirs.data_dir().to_path_buf();
         Ok(Config {
-            port: cli.port.or(file.port).unwrap_or_else(|| "/dev/ttyACM0".into()),
+            port: cli.port.or(file.port).unwrap_or_else(|| DEFAULT_PORT.into()),
             baud: cli.baud.or(file.baud).unwrap_or(115200),
             log_dir: cli.log_dir.or(file.log_dir).unwrap_or_else(|| data_dir.join("logs")),
             data_dir,

@@ -17,9 +17,13 @@ connected over USB serial.
 
 ```sh
 cargo build --release
-./target/release/meshirc                 # uses /dev/ttyACM0 @ 115200
+./target/release/meshirc                 # uses /dev/ttyACM0 @ 115200 (COM3 on Windows)
 ./target/release/meshirc -p /dev/ttyUSB0
 ```
+
+Prebuilt binaries for Linux (x86_64, aarch64, static musl) and Windows (x86_64) are
+attached to each [GitHub release](https://github.com/kareiva/meshirc/releases); pushing a
+`v*` tag builds them (`.github/workflows/release.yml`).
 
 You need read/write access to the serial device — on most distributions add yourself
 to the `dialout` (Debian/Fedora) or `uucp` (Arch) group and log in again.
