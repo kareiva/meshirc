@@ -4,8 +4,8 @@ pub enum Command {
     Part(Option<String>),
     Msg { who: String, text: String },
     Query(String),
-    Whois(String),
-    Status(String),
+    Whois(Option<String>),
+    Status(Option<String>),
     Contacts,
     Advert { flood: bool },
     Win(usize),
@@ -45,7 +45,7 @@ pub fn parse(line: &str) -> Option<Command> {
                 }
             }
         }
-        "part" | "leave" => Command::Part(if rest.is_empty() { None } else { Some(rest.to_string()) }),
+        "part" | "leave" => Command::Part(opt(rest)),
         "msg" | "m" => {
             let mut p = rest.splitn(2, ' ');
             let who = p.next().unwrap_or("").to_string();
@@ -57,8 +57,8 @@ pub fn parse(line: &str) -> Option<Command> {
             }
         }
         "query" | "q" => arg(Command::Query(rest.to_string())),
-        "whois" | "wi" => arg(Command::Whois(rest.to_string())),
-        "status" | "st" => arg(Command::Status(rest.to_string())),
+        "whois" | "wi" => Command::Whois(opt(rest)),
+        "status" | "st" => Command::Status(opt(rest)),
         "contacts" | "who" => Command::Contacts,
         "advert" => Command::Advert { flood: rest.eq_ignore_ascii_case("flood") },
         "win" | "window" | "w" => match rest.parse() {
@@ -73,6 +73,10 @@ pub fn parse(line: &str) -> Option<Command> {
     })
 }
 
+fn opt(rest: &str) -> Option<String> {
+    if rest.is_empty() { None } else { Some(rest.to_string()) }
+}
+
 fn parse_key(s: &str) -> Option<[u8; 16]> {
     hex::decode(s).ok()?.try_into().ok()
 }
@@ -82,8 +86,8 @@ pub const HELP: &[&str] = &[
     "/part [#name]      leave channel and free its slot",
     "/msg <who> <text>  private message (name, name prefix or pubkey hex)",
     "/query <who>       open a private window",
-    "/whois <who>       cached contact info",
-    "/status <who>      request live status over the mesh (repeaters/rooms)",
+    "/whois [who]       cached contact info (who defaults to the private window's node)",
+    "/status [who]      request live status over the mesh (repeaters/rooms)",
     "/contacts          refresh contact list from radio",
     "/advert [flood]    send self advertisement",
     "/win N  /close     switch / close window (also Alt+N, Ctrl+N/P)",
@@ -105,6 +109,8 @@ mod tests {
         );
         assert!(matches!(parse("/join Secret abcd"), Some(Command::Unknown(_))));
         assert_eq!(parse("/part"), Some(Command::Part(None)));
+        assert_eq!(parse("/whois"), Some(Command::Whois(None)));
+        assert_eq!(parse("/status Bob"), Some(Command::Status(Some("Bob".into()))));
         assert_eq!(
             parse("/msg Bob hi there"),
             Some(Command::Msg { who: "Bob".into(), text: "hi there".into() })

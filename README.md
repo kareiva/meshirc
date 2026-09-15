@@ -46,8 +46,8 @@ auto_join = ["#lietuva"]
 | `/part [#name]` | Leave a channel and free its slot |
 | `/msg <who> <text>` | Private message (name, unique name prefix, or pubkey hex prefix) |
 | `/query <who>` | Open a private window |
-| `/whois <who>` | Cached contact info (type, pubkey prefix, last seen, location, path) |
-| `/status <who>` | Live status request over the mesh (battery, uptime, RSSI/SNR, packet counters); only repeaters and rooms answer |
+| `/whois [who]` | Cached contact info (type, pubkey prefix, last seen, location, path); in a private window `who` defaults to that node |
+| `/status [who]` | Live status request over the mesh (battery, uptime, RSSI/SNR, packet counters); only repeaters and rooms answer |
 | `/contacts` | Reload contacts from the radio |
 | `/advert [flood]` | Send a self advertisement |
 | `/nick <name>` | Rename the radio node |
@@ -61,6 +61,11 @@ terminal paste (bracketed) inserts into the input line.
 With an empty input line, `Tab` cycles focus: input → chat (`Up`/`Down` scroll, `Home`/`End`)
 → contacts (`Up`/`Down` select, `Enter` opens a private window) → input. `Shift+Tab` goes
 back, `Esc` returns to the input, and typing a character always returns to the input.
+
+Typing `@` followed by the start of a contact name pops up the matching contacts above the
+input line (names may contain spaces, keep typing to narrow). `Tab` completes a single match
+outright; with several, `Tab`/`Up`/`Down` move the selection and `Enter` inserts it. The
+result is `@[Node Name] `. `Esc` dismisses the popup.
 
 Every message you send gets a marker: grey `○` while waiting, green `●` once a repeater
 has been heard rebroadcasting it (or `●●` when the recipient ACKed a DM), red `●` if

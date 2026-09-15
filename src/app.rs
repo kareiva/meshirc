@@ -115,6 +115,14 @@ impl Window {
     }
 }
 
+/// In-progress `@name` contact mention in the input line: `start` is the char
+/// index of the `@`, `selected` the highlighted candidate in the popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mention {
+    pub start: usize,
+    pub selected: usize,
+}
+
 pub struct App {
     pub cfg: Config,
     pub windows: Vec<Window>,
@@ -140,6 +148,7 @@ pub struct App {
     pub focus: Focus,
     pub selected_contact: Option<[u8; 32]>,
     pub sidebar_height: usize,
+    pub mention: Option<Mention>,
 }
 
 fn now_hms() -> String {
@@ -180,6 +189,7 @@ impl App {
             focus: Focus::Input,
             selected_contact: None,
             sidebar_height: 20,
+            mention: None,
             cfg,
         };
         app.notice(0, "MeshIRC — /help for commands");
@@ -286,6 +296,7 @@ impl App {
                 for c in text.chars() {
                     self.input.handle(InputRequest::InsertChar(if c == '\n' || c == '\r' { ' ' } else { c }));
                 }
+                self.refresh_mention();
             }
             AppEvent::Resize => {}
             AppEvent::Tick => self.on_tick(),
@@ -332,6 +343,7 @@ impl App {
                     Focus::Contacts => Focus::Chat,
                 };
             }
+            (KeyCode::Esc, _, _) if self.mention.is_some() => self.mention = None,
             (KeyCode::Esc, _, _) => self.focus = Focus::Input,
             _ => match self.focus {
                 Focus::Input => self.on_input_key(k),
@@ -342,7 +354,15 @@ impl App {
     }
 
     fn on_input_key(&mut self, k: KeyEvent) {
+        if self.mention.is_some() && self.on_mention_key(k) {
+            return;
+        }
         match k.code {
+            KeyCode::Char('@') if k.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                let start = self.input.cursor();
+                self.input.handle_event(&Event::Key(k));
+                self.mention = Some(Mention { start, selected: 0 });
+            }
             KeyCode::Tab => self.complete(),
             KeyCode::Up if k.modifiers.is_empty() => self.history_nav(-1),
             KeyCode::Down if k.modifiers.is_empty() => self.history_nav(1),
@@ -435,6 +455,94 @@ impl App {
         self.input = Input::new(self.history[pos].clone());
     }
 
+    // ----- @mentions -----
+
+    /// Text typed after the `@` up to the cursor.
+    fn mention_query(&self) -> String {
+        let Some(m) = self.mention else { return String::new() };
+        self.input.value().chars().skip(m.start + 1).take(self.input.cursor().saturating_sub(m.start + 1)).collect()
+    }
+
+    /// Contacts matching the current mention query; empty until at least one
+    /// character follows the `@`.
+    pub fn mention_candidates(&self) -> Vec<String> {
+        let q = self.mention_query();
+        if q.is_empty() {
+            return vec![];
+        }
+        self.contacts.complete(&q)
+    }
+
+    /// Re-validate the mention after the input changed: drop it when the cursor
+    /// left the `@word` or nothing matches any more.
+    fn refresh_mention(&mut self) {
+        let Some(m) = self.mention else { return };
+        let cursor = self.input.cursor();
+        if cursor <= m.start || self.input.value().chars().nth(m.start) != Some('@') {
+            self.mention = None;
+            return;
+        }
+        let n = self.mention_candidates().len();
+        if n == 0 && cursor > m.start + 1 {
+            self.mention = None;
+        } else if let Some(m) = &mut self.mention {
+            m.selected = m.selected.min(n.saturating_sub(1));
+        }
+    }
+
+    /// Returns true when the key was consumed by the mention popup.
+    fn on_mention_key(&mut self, k: KeyEvent) -> bool {
+        let cands = self.mention_candidates();
+        let Some(mut m) = self.mention else { return false };
+        match k.code {
+            KeyCode::Char(c) if k.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                self.input.handle(InputRequest::InsertChar(c));
+                self.refresh_mention();
+                true
+            }
+            KeyCode::Backspace => {
+                self.input.handle(InputRequest::DeletePrevChar);
+                self.refresh_mention();
+                true
+            }
+            KeyCode::Tab if cands.len() == 1 => {
+                self.accept_mention(&cands[0]);
+                true
+            }
+            KeyCode::Tab | KeyCode::Down if !cands.is_empty() => {
+                m.selected = (m.selected + 1) % cands.len();
+                self.mention = Some(m);
+                true
+            }
+            KeyCode::Up if !cands.is_empty() => {
+                m.selected = (m.selected + cands.len() - 1) % cands.len();
+                self.mention = Some(m);
+                true
+            }
+            KeyCode::Enter if !cands.is_empty() => {
+                let name = cands[m.selected].clone();
+                self.accept_mention(&name);
+                true
+            }
+            _ => {
+                self.mention = None;
+                false
+            }
+        }
+    }
+
+    /// Replace `@query` with `@[name] ` and put the cursor after it.
+    fn accept_mention(&mut self, name: &str) {
+        let Some(m) = self.mention.take() else { return };
+        let chars: Vec<char> = self.input.value().chars().collect();
+        let cursor = self.input.cursor().min(chars.len());
+        let head: String = chars[..m.start.min(cursor)].iter().collect();
+        let tail: String = chars[cursor..].iter().collect();
+        let rep = format!("@[{name}] ");
+        let at = head.chars().count() + rep.chars().count();
+        self.input = Input::new(format!("{head}{rep}{tail}")).with_cursor(at);
+    }
+
     fn complete(&mut self) {
         let value = self.input.value().to_string();
         let mut splits: Vec<usize> = vec![0];
@@ -525,12 +633,12 @@ impl App {
                 }
             }
             Command::Whois(who) => {
-                if let Some(c) = self.resolve_or_error(&who) {
+                if let Some(c) = self.target_or_error(who.as_deref(), "whois") {
                     self.print_whois(&c);
                 }
             }
             Command::Status(who) => {
-                if let Some(c) = self.resolve_or_error(&who) {
+                if let Some(c) = self.target_or_error(who.as_deref(), "status") {
                     let window = self.active;
                     if self.send_radio(RadioCmd::Whois { contact: c.clone(), window }) {
                         self.notice(window, &format!("requesting status from {}...", c.adv_name));
@@ -561,6 +669,28 @@ impl App {
             return false;
         }
         true
+    }
+
+    /// Contact named by `who`, or the node of the active private window when
+    /// `who` is omitted.
+    fn target_or_error(&mut self, who: Option<&str>, cmd: &str) -> Option<Contact> {
+        if let Some(who) = who {
+            return self.resolve_or_error(who);
+        }
+        match &self.windows[self.active].kind {
+            WindowKind::Query { prefix, name } => {
+                let found = self.contacts.by_prefix(prefix).cloned();
+                if found.is_none() {
+                    let name = name.clone();
+                    self.error(&format!("{name} is not in the contact list"));
+                }
+                found
+            }
+            _ => {
+                self.error(&format!("usage: /{cmd} <who> (no argument needed in a private window)"));
+                None
+            }
+        }
     }
 
     fn resolve_or_error(&mut self, who: &str) -> Option<Contact> {
@@ -949,6 +1079,120 @@ mod tests {
             h.at -= HEARD_GRACE;
         }
         app.handle(AppEvent::Tick);
+    }
+
+    fn contact(name: &str, key0: u8) -> Contact {
+        let mut public_key = [0u8; 32];
+        public_key[0] = key0;
+        Contact {
+            public_key,
+            contact_type: 1,
+            flags: 0,
+            path_len: -1,
+            out_path: vec![],
+            adv_name: name.into(),
+            last_advert: 0,
+            adv_lat: 0,
+            adv_lon: 0,
+            last_modification_timestamp: 0,
+        }
+    }
+
+    fn keys(app: &mut App, spec: &str) {
+        for c in spec.chars() {
+            let code = match c {
+                '\t' => KeyCode::Tab,
+                '\n' => KeyCode::Enter,
+                '\x08' => KeyCode::Backspace,
+                '\x1b' => KeyCode::Esc,
+                '^' => KeyCode::Up,
+                'v' => KeyCode::Down,
+                c => KeyCode::Char(c),
+            };
+            app.handle(AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        }
+    }
+
+    fn mention_app() -> App {
+        let mut app = app();
+        app.contacts.upsert(contact("Alice Home", 1));
+        app.contacts.upsert(contact("Alice Work", 2));
+        app.contacts.upsert(contact("Bob", 3));
+        app
+    }
+
+    #[test]
+    fn mention_tab_completes_unique() {
+        let mut app = mention_app();
+        keys(&mut app, "hi @b\t");
+        assert_eq!(app.input.value(), "hi @[Bob] ");
+        assert_eq!(app.input.cursor(), 10);
+        assert!(app.mention.is_none());
+    }
+
+    #[test]
+    fn mention_tab_cycles_and_enter_accepts() {
+        let mut app = mention_app();
+        keys(&mut app, "@al");
+        assert_eq!(app.mention_candidates(), vec!["Alice Home".to_string(), "Alice Work".to_string()]);
+        keys(&mut app, "\t");
+        assert_eq!(app.input.value(), "@al", "tab with several candidates only moves the selection");
+        assert_eq!(app.mention.unwrap().selected, 1);
+        keys(&mut app, "\t");
+        assert_eq!(app.mention.unwrap().selected, 0);
+        keys(&mut app, "v^v\n");
+        assert_eq!(app.input.value(), "@[Alice Work] ");
+        assert!(app.mention.is_none());
+    }
+
+    #[test]
+    fn mention_typing_narrows_with_spaces() {
+        let mut app = mention_app();
+        keys(&mut app, "@alice w");
+        assert_eq!(app.mention_candidates(), vec!["Alice Work".to_string()]);
+        keys(&mut app, "\n");
+        assert_eq!(app.input.value(), "@[Alice Work] ");
+    }
+
+    #[test]
+    fn mention_cancels_when_nothing_matches() {
+        let mut app = mention_app();
+        keys(&mut app, "@zed");
+        assert!(app.mention.is_none());
+        assert_eq!(app.input.value(), "@zed");
+        keys(&mut app, "\x1b");
+        keys(&mut app, " @a\x1b");
+        assert!(app.mention.is_none());
+        assert_eq!(app.input.value(), "@zed @a");
+        // Enter with no popup sends the line as usual
+        keys(&mut app, "\n");
+        assert_eq!(app.input.value(), "");
+    }
+
+    #[test]
+    fn mention_backspace_past_at_cancels() {
+        let mut app = mention_app();
+        keys(&mut app, "@a\x08");
+        assert!(app.mention.is_some());
+        assert!(app.mention_candidates().is_empty());
+        keys(&mut app, "\x08");
+        assert!(app.mention.is_none());
+        assert_eq!(app.input.value(), "");
+    }
+
+    #[test]
+    fn whois_and_status_default_to_query_window_node() {
+        let mut app = mention_app();
+        let bob = contact("Bob", 3);
+        app.execute(Command::Status(None));
+        assert!(matches!(app.windows[app.active].lines.last().unwrap().kind, LineKind::Error), "not a private window");
+        let win = app.query_window(Some(&bob), &bob.prefix());
+        app.switch(win);
+        app.execute(Command::Whois(None));
+        assert!(app.windows[win].lines.iter().any(|l| l.text.contains("Bob")));
+        assert!(!matches!(app.windows[win].lines.last().unwrap().kind, LineKind::Error));
+        app.execute(Command::Status(None));
+        assert_eq!(app.windows[win].lines.last().unwrap().text, "requesting status from Bob...");
     }
 
     #[test]

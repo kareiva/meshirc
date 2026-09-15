@@ -232,8 +232,8 @@ match ev.payload {
 | `/part [#name]` | `set_channel(idx, "", [0;16])` to clear the slot, close window. |
 | `/msg <who> <text>` | Resolve contact, send DM, open/activate query window. |
 | `/query <who>` | Open a query window without sending. |
-| `/whois <who>` | Print cached fields. |
-| `/status <who>` | `send_binary_req(Status)` async; print result in the issuing window. |
+| `/whois [who]` | Print cached fields. `who` may be omitted in a query window (targets that node). |
+| `/status [who]` | `send_binary_req(Status)` async; print result in the issuing window. `who` optional in a query window. |
 | `/contacts` | Force `get_contacts(0)` refresh. |
 | `/advert` | `send_advert(false)` — local zero-hop advert. `/advert flood` for flood. |
 | `/win N`, `/close` | Window management. |
@@ -244,6 +244,12 @@ match ev.payload {
 ## Keybindings
 
 `Alt+0..9` / `Ctrl+N` / `Ctrl+P` switch windows · `PgUp`/`PgDn` scroll · `Tab` complete contact/channel names · `Up`/`Down` input history · `Ctrl+C` / `/quit` exit.
+
+`@`-mentions (`App::mention`): typing `@` arms a mention at the cursor; the following characters
+(spaces included, since names contain spaces) filter `ContactBook::complete`. While there are
+candidates, `ui::draw_mentions` shows a popup above the input aligned with the `@`; `Tab` completes
+a unique match, otherwise `Tab`/`Down`/`Up` move the selection and `Enter` inserts `@[Name] `.
+The mention is dropped on `Esc`, on cursor movement, when nothing matches, or when backspacing over the `@`.
 
 Focus model (`App::focus`): with an empty input, `Tab` cycles Input → Chat → Contacts; `Shift+Tab` reverses; `Esc` or typing a printable char returns to Input. Chat focus: `Up`/`Down`/`Home`/`End` scroll. Contacts focus: `Up`/`Down` move `selected_contact` (tracked by pubkey so re-sorting doesn't lose it), `Enter` opens/activates the query window. The prompt shows `[win|scroll]` / `[win|contacts]` and the sidebar title turns yellow when focused.
 
@@ -265,6 +271,8 @@ channel/DM text and receiving replies (needs a second node).
 
 ## Conventions
 
+- **Do not create git commits.** Leave changes in the working tree; the user
+  reviews and commits themselves. Never `git push` or tag either.
 - `cargo test` must pass; no `cargo fmt`/`clippy` installed on this machine yet.
 - Never print to stdout/stderr while the TUI runs; use `tracing`.
 - Bracketed paste is enabled; `Event::Paste` is turned into `AppEvent::Paste` and inserted into the input line.
@@ -278,4 +286,3 @@ channel/DM text and receiving replies (needs a second node).
 - `/part` currently clears the radio slot (implemented). Alternative: keep it programmed and only hide the window.
 - Messages > 160 bytes are rejected (implemented). Alternative: auto-split.
 - `set_time` at startup if the radio clock is far off — not implemented.
-- Sidebar has no scrolling; with 300+ contacts only the most recent fit.
