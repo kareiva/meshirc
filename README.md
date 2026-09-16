@@ -34,8 +34,14 @@ Optional config at `~/.config/meshirc/config.toml`:
 port = "/dev/ttyACM0"
 baud = 115200
 history_lines = 200
+save_private = true     # log private messages and reopen private windows on start
 auto_join = ["#lietuva"]
 ```
+
+Chat history lives in `~/.local/share/meshirc/logs/`, one plain-text file per channel or
+private window; the last `history_lines` lines are shown when a window opens. Channels and
+private windows from earlier sessions are reopened automatically. `save_private = false`
+(or `--save-private false`) keeps private messages off disk entirely.
 
 ## Commands
 
@@ -52,6 +58,8 @@ auto_join = ["#lietuva"]
 | `/advert [flood]` | Send a self advertisement |
 | `/nick <name>` | Rename the radio node |
 | `/win N`, `/close` | Window management (0 = status window) |
+| `/set [save_private on\|off]` | Show or change settings for this session; put `save_private = false` in the config to persist |
+| `/wipe [target]` | Delete history: the current window, a named `<window>`, all `channels`, all `private` chats, or `all` — clears the screen and deletes the log files, no confirmation |
 | `/help`, `/quit` | |
 
 Keys: `Alt+0..9` (0 = status), `Ctrl+N`/`Ctrl+P` switch windows · `PgUp`/`PgDn` scroll ·

@@ -11,10 +11,23 @@ pub enum Command {
     Win(usize),
     Close,
     Nick(String),
+    /// `/set [key [value]]` — no key lists settings.
+    Set { key: Option<String>, value: Option<String> },
+    Wipe(WipeTarget),
     Help,
     Quit,
     Say(String),
     Unknown(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum WipeTarget {
+    /// The active window.
+    Active,
+    All,
+    Channels,
+    Private,
+    Window(String),
 }
 
 pub fn parse(line: &str) -> Option<Command> {
@@ -67,6 +80,19 @@ pub fn parse(line: &str) -> Option<Command> {
         },
         "close" | "wc" => Command::Close,
         "nick" => arg(Command::Nick(rest.to_string())),
+        "set" => {
+            let mut p = rest.splitn(2, ' ');
+            let key = p.next().filter(|k| !k.is_empty()).map(String::from);
+            let value = p.next().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            Command::Set { key, value }
+        }
+        "wipe" => Command::Wipe(match rest.to_lowercase().as_str() {
+            "" => WipeTarget::Active,
+            "all" => WipeTarget::All,
+            "channels" => WipeTarget::Channels,
+            "private" => WipeTarget::Private,
+            _ => WipeTarget::Window(rest.to_string()),
+        }),
         "help" | "h" => Command::Help,
         "quit" | "exit" => Command::Quit,
         other => Command::Unknown(format!("unknown command: /{other}")),
@@ -92,6 +118,8 @@ pub const HELP: &[&str] = &[
     "/advert [flood]    send self advertisement",
     "/win N  /close     switch / close window (also Alt+N, Ctrl+N/P)",
     "/nick <name>       set radio node name",
+    "/set [key] [val]   show or change settings (save_private on|off)",
+    "/wipe [target]     delete history: this window, <window>, channels, private, all",
     "/quit              exit",
 ];
 
@@ -121,5 +149,16 @@ mod tests {
         assert_eq!(parse("   "), None);
         assert!(matches!(parse("/msg Bob"), Some(Command::Unknown(_))));
         assert!(matches!(parse("/nope"), Some(Command::Unknown(_))));
+        assert_eq!(parse("/set"), Some(Command::Set { key: None, value: None }));
+        assert_eq!(parse("/set save_private"), Some(Command::Set { key: Some("save_private".into()), value: None }));
+        assert_eq!(
+            parse("/set save_private off"),
+            Some(Command::Set { key: Some("save_private".into()), value: Some("off".into()) })
+        );
+        assert_eq!(parse("/wipe"), Some(Command::Wipe(WipeTarget::Active)));
+        assert_eq!(parse("/wipe ALL"), Some(Command::Wipe(WipeTarget::All)));
+        assert_eq!(parse("/wipe private"), Some(Command::Wipe(WipeTarget::Private)));
+        assert_eq!(parse("/wipe channels"), Some(Command::Wipe(WipeTarget::Channels)));
+        assert_eq!(parse("/wipe #lt"), Some(Command::Wipe(WipeTarget::Window("#lt".into()))));
     }
 }

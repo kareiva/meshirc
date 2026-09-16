@@ -17,6 +17,9 @@ pub struct Cli {
     pub log_dir: Option<PathBuf>,
     #[arg(long)]
     pub history_lines: Option<usize>,
+    /// Log private messages and restore private windows on startup (default true)
+    #[arg(long, value_name = "BOOL")]
+    pub save_private: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -25,6 +28,7 @@ struct FileConfig {
     baud: Option<u32>,
     log_dir: Option<PathBuf>,
     history_lines: Option<usize>,
+    save_private: Option<bool>,
     auto_join: Option<Vec<String>>,
 }
 
@@ -37,6 +41,8 @@ pub struct Config {
     pub log_dir: PathBuf,
     pub data_dir: PathBuf,
     pub history_lines: usize,
+    /// Log private messages to disk and reopen private windows on startup.
+    pub save_private: bool,
     pub auto_join: Vec<String>,
 }
 
@@ -58,6 +64,7 @@ impl Config {
             log_dir: cli.log_dir.or(file.log_dir).unwrap_or_else(|| data_dir.join("logs")),
             data_dir,
             history_lines: cli.history_lines.or(file.history_lines).unwrap_or(200),
+            save_private: cli.save_private.or(file.save_private).unwrap_or(true),
             auto_join: file.auto_join.unwrap_or_default(),
         })
     }

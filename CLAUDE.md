@@ -21,11 +21,11 @@ Written in Rust. Talks to the radio through the
 | Topic | Decision |
 |---|---|
 | Channel slots full | **Refuse** `/join` with an error telling the user to `/part` first. No eviction. |
-| History | **Plain-text logs per window**, irssi-style, in `~/.local/share/meshirc/logs/<window>.log`. Append on send/receive; on startup re-read the last N (default 200) lines into scrollback. |
+| History | **Plain-text logs per window**, irssi-style, in `~/.local/share/meshirc/logs/<window>.log` (private windows: `<Name>_<12-hex prefix>.log`). Append on send/receive; on startup re-read the last N (default 200) lines into scrollback. Private windows are reopened from their log files once contacts are loaded (`App::restore_queries`). `save_private = false` (config/CLI, or `/set save_private off` for the session) disables private logging and restoring. `/wipe` deletes history (scrollback + files). |
 | Layout | **irssi windows + Discord sidebar.** Numbered windows (0 = status, channels/queries from 1 in open order) switched with `Alt+0..9`, `Ctrl+N`/`Ctrl+P`, `/win N`. Persistent right pane lists every contact. Top bar: node name, serial port, radio settings, GPS/advertised location, battery. Bottom bar: clock, `N:name` for every window (names shortened with `…` when too narrow; unread windows in red, bold red for new messages), `[disconnected]`. |
 | `/whois` / `/status` | `/whois` prints cached contact info only (pubkey shown as first 16 bytes). `/status` sends a binary status request and prints the response (or a timeout notice) when it arrives. Only repeaters/rooms answer. |
 | Contact addressing | Names may contain spaces, so `/msg` / `/query` / `/whois` accept: exact name, unique case-insensitive name prefix, or public-key hex prefix (≥ 4 hex chars). Ambiguity → error listing the candidates. Tab-completion in the input line resolves names. |
-| Config | CLI flags via `clap`, with optional `~/.config/meshirc/config.toml` for the same values (`port`, `baud`, `log_dir`, `history_lines`, `auto_join = ["#foo"]`). CLI overrides file. |
+| Config | CLI flags via `clap`, with optional `~/.config/meshirc/config.toml` for the same values (`port`, `baud`, `log_dir`, `history_lines`, `save_private`, `auto_join = ["#foo"]`). CLI overrides file. |
 
 ## MeshCore facts that shape the code
 
@@ -238,6 +238,8 @@ match ev.payload {
 | `/advert` | `send_advert(false)` — local zero-hop advert. `/advert flood` for flood. |
 | `/win N`, `/close` | Window management. |
 | `/nick <name>` | `set_name` on the radio (optional, low priority). |
+| `/set [key [value]]` | Show/change session settings; only `save_private on\|off` so far. Not persisted (config file does that). |
+| `/wipe [target]` | Delete history: active window (default), `<window>` by name, `channels`, `private`, `all`. Clears scrollback, drops the window's pending marks and deletes the log file(s), including logs of windows that are not open. No confirmation. |
 | `/help`, `/quit` | Obvious. |
 | plain text | Send to the active window: channel → `send_channel_msg`, query → `send_msg`, status → error. |
 

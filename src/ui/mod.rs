@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn mention_popup_renders_above_input() {
         let dir = std::env::temp_dir().join(format!("meshirc-ui-test-{}", std::process::id()));
-        let cfg = Config { port: String::new(), baud: 0, log_dir: dir.join("logs"), data_dir: dir, history_lines: 0, auto_join: vec![] };
+        let cfg = Config { port: String::new(), baud: 0, log_dir: dir.join("logs"), data_dir: dir, history_lines: 0, save_private: true, auto_join: vec![] };
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         std::mem::forget(rx);
         let mut app = App::new(cfg, tx).unwrap();

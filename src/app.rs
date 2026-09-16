@@ -1,9 +1,9 @@
 use crate::channels::{self, SlotTable, MAX_TEXT_BYTES};
-use crate::commands::{self, Command, HELP};
+use crate::commands::{self, Command, WipeTarget, HELP};
 use crate::config::Config;
 use crate::contacts::{self, ContactBook, Resolve};
 use crate::event::{AppEvent, RadioCmd, RadioReply};
-use crate::logs::LogStore;
+use crate::logs::{self, LogStore};
 use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use meshcore_rs::events::{Contact, DeviceInfoData, EventPayload, SelfInfo, StatusData};
@@ -144,6 +144,8 @@ pub struct App {
     pending_sends: Vec<PendingSend>,
     heard: Vec<HeardPacket>,
     pending_joins: Vec<String>,
+    /// Private windows from earlier sessions have been reopened (done once contacts are known).
+    queries_restored: bool,
     ticks: u64,
     pub should_quit: bool,
     pub page_height: usize,
@@ -186,6 +188,7 @@ impl App {
             pending_sends: Vec::new(),
             heard: Vec::new(),
             pending_joins: cfg.auto_join.iter().map(|n| channels::normalize_name(n)).collect(),
+            queries_restored: false,
             ticks: 0,
             should_quit: false,
             page_height: 20,
@@ -203,8 +206,9 @@ impl App {
     // ----- output helpers -----
 
     fn push(&mut self, win: usize, line: Line, log: bool, level: u8) {
+        let save_private = self.cfg.save_private;
         let Some(w) = self.windows.get_mut(win) else { return };
-        if log {
+        if log && (save_private || !matches!(w.kind, WindowKind::Query { .. })) {
             let entry = match &line.kind {
                 LineKind::Msg { nick, .. } => format!("{} <{}> {}", Local::now().format("%Y-%m-%d %H:%M:%S"), nick, line.text),
                 _ => format!("{} -!- {}", Local::now().format("%Y-%m-%d %H:%M:%S"), line.text),
@@ -251,7 +255,11 @@ impl App {
 
     fn open_window(&mut self, kind: WindowKind) -> usize {
         let w = Window { kind, lines: vec![], scroll: 0, activity: 0 };
-        let history = self.logs.tail(&w.log_name(), self.cfg.history_lines);
+        let history = if self.cfg.save_private || !matches!(w.kind, WindowKind::Query { .. }) {
+            self.logs.tail(&w.log_name(), self.cfg.history_lines)
+        } else {
+            vec![]
+        };
         self.windows.push(w);
         let idx = self.windows.len() - 1;
         for h in history {
@@ -290,6 +298,123 @@ impl App {
         }
         let name = contact.map(|c| c.adv_name.clone()).unwrap_or_else(|| hex::encode(prefix));
         self.open_window(WindowKind::Query { prefix: *prefix, name })
+    }
+
+    /// Reopen a private window for every `<name>_<prefix>.log` on disk, so
+    /// conversations survive restarts like channels do. Idempotent.
+    fn restore_queries(&mut self) -> usize {
+        let mut opened = 0;
+        for log in self.logs.list() {
+            let Some((name, prefix)) = logs::parse_query_log(&log) else { continue };
+            if self.find_query(&prefix).is_some() {
+                continue;
+            }
+            let name = self.contacts.by_prefix(&prefix).map(|c| c.adv_name.clone()).unwrap_or(name);
+            self.open_window(WindowKind::Query { prefix, name });
+            opened += 1;
+        }
+        opened
+    }
+
+    /// Drop a window's scrollback and delete its log file; returns whether a file existed.
+    fn wipe_window(&mut self, i: usize) -> bool {
+        let w = &mut self.windows[i];
+        w.lines.clear();
+        w.scroll = 0;
+        self.pending_sends.retain(|p| p.window != i);
+        self.pending_acks.retain(|_, (win, _)| *win != i);
+        let name = w.log_name();
+        self.logs.remove(&name)
+    }
+
+    fn wipe(&mut self, target: WipeTarget) {
+        let (channels, private) = match target {
+            WipeTarget::Active => {
+                let i = self.active;
+                if i == 0 {
+                    self.error("status window has no history; usage: /wipe [<window>|channels|private|all]");
+                    return;
+                }
+                self.wipe_window(i);
+                self.notice(i, "history wiped");
+                return;
+            }
+            WipeTarget::Window(name) => {
+                let found = self.windows.iter().position(|w| match &w.kind {
+                    WindowKind::Status => false,
+                    WindowKind::Channel { name: n, .. } => channels::same_channel(n, &name),
+                    WindowKind::Query { name: n, .. } => n.eq_ignore_ascii_case(&name),
+                });
+                match found {
+                    Some(i) => {
+                        self.wipe_window(i);
+                        let active = self.active;
+                        self.notice(active, &format!("history of {} wiped", self.windows[i].name()));
+                    }
+                    None => self.error(&format!("no window named '{name}'")),
+                }
+                return;
+            }
+            WipeTarget::All => (true, true),
+            WipeTarget::Channels => (true, false),
+            WipeTarget::Private => (false, true),
+        };
+        let mut files = 0;
+        for i in 1..self.windows.len() {
+            let hit = match self.windows[i].kind {
+                WindowKind::Channel { .. } => channels,
+                WindowKind::Query { .. } => private,
+                WindowKind::Status => false,
+            };
+            if hit && self.wipe_window(i) {
+                files += 1;
+            }
+        }
+        // Logs of windows that are not open right now.
+        for log in self.logs.list() {
+            let hit = if logs::parse_query_log(&log).is_some() { private } else { channels && log != "status" };
+            if hit && self.logs.remove(&log) {
+                files += 1;
+            }
+        }
+        let what = match (channels, private) {
+            (true, true) => "all",
+            (true, false) => "channel",
+            _ => "private",
+        };
+        let active = self.active;
+        self.notice(active, &format!("{what} history wiped ({files} log files deleted)"));
+    }
+
+    fn set(&mut self, key: Option<String>, value: Option<String>) {
+        let active = self.active;
+        let show = |app: &mut App| {
+            let v = if app.cfg.save_private { "on" } else { "off" };
+            app.notice(active, &format!("save_private = {v}  (log private messages, reopen private windows on start)"));
+        };
+        match key.as_deref() {
+            None => show(self),
+            Some("save_private") => {
+                let Some(value) = value else { return show(self) };
+                let on = match value.to_lowercase().as_str() {
+                    "on" | "true" | "yes" | "1" => true,
+                    "off" | "false" | "no" | "0" => false,
+                    _ => return self.error("usage: /set save_private on|off"),
+                };
+                self.cfg.save_private = on;
+                show(self);
+                if on {
+                    let n = self.restore_queries();
+                    if n > 0 {
+                        self.notice(active, &format!("reopened {n} private window(s) from disk"));
+                    }
+                } else {
+                    self.notice(active, "existing private logs are kept; /wipe private deletes them");
+                }
+                self.notice(active, "for this session only; put save_private = true|false in config.toml to persist");
+            }
+            Some(k) => self.error(&format!("unknown setting '{k}'; settings: save_private")),
+        }
     }
 
     // ----- input -----
@@ -660,6 +785,8 @@ impl App {
             Command::Nick(name) => {
                 self.send_radio(RadioCmd::SetName(name));
             }
+            Command::Set { key, value } => self.set(key, value),
+            Command::Wipe(target) => self.wipe(target),
             Command::Say(text) => self.say(&text),
         }
     }
@@ -835,6 +962,15 @@ impl App {
                 self.notice(0, &format!("{} contacts loaded", self.contacts.len()));
                 for name in std::mem::take(&mut self.pending_joins) {
                     self.join(&name, None);
+                }
+                if !self.queries_restored {
+                    self.queries_restored = true;
+                    if self.cfg.save_private {
+                        let n = self.restore_queries();
+                        if n > 0 {
+                            self.notice(0, &format!("reopened {n} private window(s)"));
+                        }
+                    }
                 }
             }
             RadioReply::Joined { idx, name } => {
@@ -1043,13 +1179,19 @@ mod tests {
     use meshcore_rs::{EventType, RouteType};
 
     fn app() -> App {
-        let dir = std::env::temp_dir().join(format!("meshirc-test-{}", std::process::id()));
+        app_in("", 0)
+    }
+
+    /// App with its own log directory (`tag` keeps tests apart) and history loading.
+    fn app_in(tag: &str, history_lines: usize) -> App {
+        let dir = std::env::temp_dir().join(format!("meshirc-test-{}{}", std::process::id(), tag));
         let cfg = Config {
             port: String::new(),
             baud: 0,
             log_dir: dir.join("logs"),
             data_dir: dir,
-            history_lines: 0,
+            history_lines,
+            save_private: true,
             auto_join: vec![],
         };
         let (tx, rx) = mpsc::channel(8);
@@ -1296,5 +1438,106 @@ mod tests {
         }
         app.handle(AppEvent::Tick);
         assert_eq!(app.mark_of(win, 0), Some(Mark::Acked));
+    }
+
+    #[test]
+    fn private_windows_restored_from_logs() {
+        let mut app = app_in("-restore", 50);
+        let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
+        app.logs = LogStore::new(&app.cfg.log_dir).unwrap();
+        let bob = contact("Bob", 3);
+        let win = app.query_window(Some(&bob), &bob.prefix());
+        app.message(win, "Bob", "hello there", false, None);
+        assert_eq!(app.logs.tail("Bob_030000000000", 10).len(), 1);
+
+        // Next session: the window comes back once contacts are known.
+        let mut app2 = app_in("-restore", 50);
+        assert!(app2.find_query(&bob.prefix()).is_none());
+        app2.handle(AppEvent::Reply(RadioReply::Contacts(vec![bob.clone()])));
+        let win = app2.find_query(&bob.prefix()).expect("private window reopened");
+        assert_eq!(app2.windows[win].name(), "Bob");
+        assert!(app2.windows[win].lines.iter().any(|l| l.kind == LineKind::History && l.text.contains("hello there")));
+        // Refreshing contacts later does not duplicate it.
+        app2.handle(AppEvent::Reply(RadioReply::Contacts(vec![bob.clone()])));
+        assert_eq!(app2.windows.iter().filter(|w| matches!(w.kind, WindowKind::Query { .. })).count(), 1);
+
+        // Unknown contact: the name comes from the file.
+        let mut app3 = app_in("-restore", 50);
+        app3.handle(AppEvent::Reply(RadioReply::Contacts(vec![])));
+        let win = app3.find_query(&bob.prefix()).expect("private window reopened");
+        assert_eq!(app3.windows[win].name(), "Bob");
+
+        // save_private off: nothing restored, nothing logged.
+        let mut app4 = app_in("-restore", 50);
+        app4.cfg.save_private = false;
+        app4.handle(AppEvent::Reply(RadioReply::Contacts(vec![bob.clone()])));
+        assert!(app4.find_query(&bob.prefix()).is_none());
+        let win = app4.query_window(Some(&bob), &bob.prefix());
+        assert!(app4.windows[win].lines.is_empty(), "no history loaded when off");
+        app4.message(win, "Bob", "secret", false, None);
+        assert!(!app4.logs.tail("Bob_030000000000", 10).iter().any(|l| l.contains("secret")));
+        let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
+    }
+
+    #[test]
+    fn set_save_private_toggles_logging() {
+        let mut app = app_in("-set", 50);
+        let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
+        app.logs = LogStore::new(&app.cfg.log_dir).unwrap();
+        let bob = contact("Bob", 3);
+        let win = app.query_window(Some(&bob), &bob.prefix());
+        app.execute(Command::Set { key: Some("save_private".into()), value: Some("off".into()) });
+        assert!(!app.cfg.save_private);
+        app.message(win, "Bob", "not logged", false, None);
+        assert!(app.logs.tail("Bob_030000000000", 10).is_empty());
+        app.execute(Command::Set { key: Some("save_private".into()), value: Some("on".into()) });
+        assert!(app.cfg.save_private);
+        app.message(win, "Bob", "logged", false, None);
+        assert_eq!(app.logs.tail("Bob_030000000000", 10).len(), 1);
+        // Channel logging is unaffected by the switch.
+        app.cfg.save_private = false;
+        app.message(1, "Me", "chan", true, None);
+        assert_eq!(app.logs.tail("#test", 10).len(), 1);
+        app.execute(Command::Set { key: Some("bogus".into()), value: None });
+        assert!(matches!(app.windows[app.active].lines.last().unwrap().kind, LineKind::Error));
+        let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
+    }
+
+    #[test]
+    fn wipe_clears_scrollback_and_logs() {
+        let mut app = app_in("-wipe", 50);
+        let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
+        app.logs = LogStore::new(&app.cfg.log_dir).unwrap();
+        let bob = contact("Bob", 3);
+        app.message(1, "Me", "in channel", true, None);
+        let q = app.query_window(Some(&bob), &bob.prefix());
+        app.message(q, "Bob", "in private", false, None);
+        app.logs.append("#old", "orphan channel log");
+        app.logs.append("Ann_010000000000", "orphan private log");
+
+        app.switch(0);
+        app.execute(Command::Wipe(WipeTarget::Active));
+        assert!(matches!(app.windows[0].lines.last().unwrap().kind, LineKind::Error));
+
+        app.switch(1);
+        app.execute(Command::Wipe(WipeTarget::Active));
+        assert!(app.logs.tail("#test", 10).is_empty());
+        assert!(app.windows[1].lines.iter().all(|l| l.kind == LineKind::Notice), "only the wipe notice remains");
+        assert_eq!(app.logs.tail("Bob_030000000000", 10).len(), 1, "private untouched");
+
+        app.execute(Command::Wipe(WipeTarget::Private));
+        assert!(app.logs.tail("Bob_030000000000", 10).is_empty());
+        assert!(app.windows[q].lines.iter().all(|l| l.kind != LineKind::History && !matches!(l.kind, LineKind::Msg { .. })));
+        assert!(app.logs.tail("Ann_010000000000", 10).is_empty(), "orphan private log deleted");
+        assert_eq!(app.logs.tail("#old", 10).len(), 1, "channel log kept");
+
+        app.execute(Command::Wipe(WipeTarget::Window("bob".into())));
+        assert!(!matches!(app.windows[app.active].lines.last().unwrap().kind, LineKind::Error));
+        app.execute(Command::Wipe(WipeTarget::Window("nobody".into())));
+        assert!(matches!(app.windows[app.active].lines.last().unwrap().kind, LineKind::Error));
+
+        app.execute(Command::Wipe(WipeTarget::All));
+        assert!(app.logs.list().is_empty());
+        let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
     }
 }
