@@ -12,16 +12,8 @@ pub fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
         base,
     )];
     let right = if app.connected { String::new() } else { "[disconnected] ".to_string() };
-    let act: Vec<String> = app
-        .windows
-        .iter()
-        .enumerate()
-        .filter(|(_, w)| w.activity > 0)
-        .map(|(i, w)| if w.activity >= 2 { format!("{i}!") } else { i.to_string() })
-        .collect();
-    let act = (!act.is_empty()).then(|| format!("[act: {}] ", act.join(",")));
     let names: Vec<String> = app.windows.iter().map(|w| w.name()).collect();
-    let fixed = spans[0].content.chars().count() + right.chars().count() + act.as_ref().map_or(0, |a| a.chars().count());
+    let fixed = spans[0].content.chars().count() + right.chars().count();
     let width_with = |max: usize| -> usize {
         names.iter().enumerate().map(|(i, n)| format!("{i}:{} ", shorten(n, max)).chars().count()).sum::<usize>() + fixed
     };
@@ -30,17 +22,19 @@ pub fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
     while max > 3 && width_with(max) > area.width as usize {
         max -= 1;
     }
-    for (i, n) in names.iter().enumerate() {
+    // unread windows turn red (bold for new messages, plain for notices)
+    for (i, (n, w)) in names.iter().zip(&app.windows).enumerate() {
         let style = if i == app.active {
             base.add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else if w.activity >= 2 {
+            base.fg(Color::LightRed).add_modifier(Modifier::BOLD)
+        } else if w.activity > 0 {
+            base.fg(Color::LightRed)
         } else {
             base
         };
         spans.push(Span::styled(format!("{i}:{}", shorten(n, max)), style));
         spans.push(Span::styled(" ", base));
-    }
-    if let Some(a) = &act {
-        spans.push(Span::styled(a.clone(), base.fg(Color::Yellow)));
     }
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = (area.width as usize).saturating_sub(used + right.chars().count());
