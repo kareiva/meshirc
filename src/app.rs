@@ -135,6 +135,8 @@ pub struct App {
     pub me: Option<SelfInfo>,
     pub dev: Option<DeviceInfoData>,
     pub battery: Option<(u16, u8)>,
+    /// Firmware `gps` status text; `Some(None)` once the radio said it has no GPS.
+    pub gps: Option<Option<String>>,
     pub connected: bool,
     logs: LogStore,
     radio: mpsc::Sender<RadioCmd>,
@@ -176,6 +178,7 @@ impl App {
             me: None,
             dev: None,
             battery: None,
+            gps: None,
             connected: false,
             logs,
             radio,
@@ -880,6 +883,7 @@ impl App {
             }
             RadioReply::Status { window, name, status } => self.print_status(window, &name, &status),
             RadioReply::Battery { mv, pct } => self.battery = Some((mv, pct)),
+            RadioReply::Gps(status) => self.gps = Some(status),
             RadioReply::Notice { window, text } => {
                 let w = window.filter(|w| *w < self.windows.len()).unwrap_or(self.active);
                 self.notice(w, &text)
@@ -1011,6 +1015,10 @@ impl App {
         }
         if self.ticks % 60 == 0 && self.connected {
             let _ = self.radio.try_send(RadioCmd::Battery);
+        }
+        // sats/fix change quickly; stop asking once the radio said it has no GPS
+        if self.ticks % 30 == 0 && self.connected && !matches!(self.gps, Some(None)) {
+            let _ = self.radio.try_send(RadioCmd::Gps);
         }
     }
 

@@ -61,6 +61,7 @@ async fn run_connection(
     if let Ok(b) = cmds.lock().await.get_bat().await {
         reply(tx, RadioReply::Battery { mv: b.battery_mv, pct: b.percentage() }).await;
     }
+    reply(tx, RadioReply::Gps(gps_status(&cmds).await)).await;
 
     mc.start_auto_message_fetching().await;
     let mut events = mc.event_stream();
@@ -155,6 +156,46 @@ async fn handle_cmd(cmd: RadioCmd, cmds: &Cmds, dispatcher: &Arc<EventDispatcher
                 reply(tx, RadioReply::Battery { mv: b.battery_mv, pct: b.percentage() }).await;
             }
         }
+        RadioCmd::Gps => reply(tx, RadioReply::Gps(gps_status(&cmds).await)).await,
         RadioCmd::Shutdown => {}
+    }
+}
+
+/// Companion protocol v14+: `CMD_RUN_CLI_COMMAND` (66) runs a firmware CLI command and answers
+/// with `RESP_CODE_CLI_REPLY` (29) + text. meshcore-rs 0.2 knows neither, so the reply surfaces as
+/// `EventType::Unknown` with the raw frame bytes.
+const CMD_RUN_CLI_COMMAND: u8 = 66;
+const RESP_CODE_CLI_REPLY: u8 = 29;
+
+async fn cli_command(cmds: &Cmds, text: &str) -> anyhow::Result<String> {
+    let mut data = vec![CMD_RUN_CLI_COMMAND];
+    data.extend_from_slice(text.as_bytes());
+    let ev = cmds
+        .lock()
+        .await
+        .send_multi(&data, &[EventType::Unknown, EventType::Error], Duration::from_secs(3))
+        .await?;
+    match ev.payload {
+        EventPayload::Bytes(b) if b.first() == Some(&RESP_CODE_CLI_REPLY) => {
+            Ok(String::from_utf8_lossy(&b[1..]).trim().to_string())
+        }
+        EventPayload::Bytes(b) => anyhow::bail!("unexpected frame {:02x?}", b.first()),
+        other => anyhow::bail!("{other:?}"),
+    }
+}
+
+/// Same as meshcore-cli's `gps`: the firmware prints `on, {active|deactivated}, {fix|no fix}, N sats`
+/// or `off`. Boards without GPS (or firmware without CLI passthrough) yield `None`.
+async fn gps_status(cmds: &Cmds) -> Option<String> {
+    match cli_command(cmds, "gps").await {
+        Ok(s) if s.starts_with("on") || s == "off" => Some(s),
+        Ok(s) => {
+            info!("gps: unsupported ({s})");
+            None
+        }
+        Err(e) => {
+            info!("gps: {e}");
+            None
+        }
     }
 }

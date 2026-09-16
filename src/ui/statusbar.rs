@@ -78,10 +78,11 @@ pub fn draw_top(f: &mut Frame, app: &App, area: Rect) {
                     me.tx_power
                 ),
             );
-            let gps = if me.adv_lat == 0 && me.adv_lon == 0 {
-                "none".to_string()
-            } else {
-                format!("{:.5},{:.5}", me.adv_lat as f64 / 1_000_000.0, me.adv_lon as f64 / 1_000_000.0)
+            // firmware `gps` reply: "on, active, fix, 7 sats" / "off"
+            let gps = match &app.gps {
+                None => "…".to_string(),
+                Some(None) => "n/a".to_string(),
+                Some(Some(s)) => s.clone(),
             };
             item("gps", gps);
         }

@@ -24,6 +24,7 @@ pub enum RadioCmd {
     Advert { flood: bool },
     SetName(String),
     Battery,
+    Gps,
     Shutdown,
 }
 
@@ -40,6 +41,8 @@ pub enum RadioReply {
     SendFailed { window: usize, line: usize, error: String },
     Status { window: usize, name: String, status: StatusData },
     Battery { mv: u16, pct: u8 },
+    /// Reply to the firmware `gps` CLI command (`on, active, fix, 7 sats` / `off`); `None` if unsupported.
+    Gps(Option<String>),
     Notice { window: Option<usize>, text: String },
     Error(String),
 }
