@@ -252,8 +252,10 @@ impl App {
         self.windows.push(w);
         let idx = self.windows.len() - 1;
         for h in history {
-            let (time, text) = h.split_at(h.len().min(19));
-            let time = time.get(11..16).unwrap_or("").to_string();
+            let (time, text) = match h.get(..19) {
+                Some(t) if t.is_ascii() => (t.get(11..16).unwrap_or("").to_string(), &h[19..]),
+                _ => (String::new(), h.as_str()),
+            };
             self.windows[idx].lines.push(Line { time, kind: LineKind::History, text: text.trim_start().to_string() });
         }
         idx
