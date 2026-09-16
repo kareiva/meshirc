@@ -9,7 +9,7 @@ connected over USB serial.
 10:51 -!- channel slot 1: #lietuva                                │▲ LT-VM Pavilnys   2m
 10:52 <Someone> labas                                             │▲ VA-Druzai-2     15m
 10:52 <LY2EN C99> hi ✓                                            │■ LT-KA OBS        1h
- 10:52 [1:status] [2:Public] [3:#lietuva] [act: 3!]          LY2EN C99 bat 47% (3.44V)
+ 10:52 [1:status] [2:Public] [3:#lietuva]                    LY2EN C99 bat 47% (3.44V)
 [#lietuva] _
 ```
 
@@ -56,7 +56,8 @@ auto_join = ["#lietuva"]
 
 Keys: `Alt+0..9` (0 = status), `Ctrl+N`/`Ctrl+P` switch windows · `PgUp`/`PgDn` scroll ·
 `Tab` completes contact and channel names · `Up`/`Down` input history · `Ctrl+C` quits ·
-terminal paste (bracketed) inserts into the input line.
+terminal paste (bracketed) inserts into the input line. Windows with unread activity are
+shown in red on the bottom bar (bold red for new messages).
 
 With an empty input line, `Tab` cycles focus: input → chat (`Up`/`Down` scroll, `Home`/`End`)
 → contacts (`Up`/`Down` select, `Enter` opens a private window) → input. `Shift+Tab` goes

@@ -22,7 +22,7 @@ Written in Rust. Talks to the radio through the
 |---|---|
 | Channel slots full | **Refuse** `/join` with an error telling the user to `/part` first. No eviction. |
 | History | **Plain-text logs per window**, irssi-style, in `~/.local/share/meshirc/logs/<window>.log`. Append on send/receive; on startup re-read the last N (default 200) lines into scrollback. |
-| Layout | **irssi windows + Discord sidebar.** Numbered windows (0 = status, channels/queries from 1 in open order) switched with `Alt+0..9`, `Ctrl+N`/`Ctrl+P`, `/win N`. Persistent right pane lists every contact. Top bar: node name, serial port, radio settings, GPS/advertised location, battery. Bottom bar: clock, `N:name` for every window (names shortened with `…` when too narrow), `[act: 2,4!]` for unread, `[disconnected]`. |
+| Layout | **irssi windows + Discord sidebar.** Numbered windows (0 = status, channels/queries from 1 in open order) switched with `Alt+0..9`, `Ctrl+N`/`Ctrl+P`, `/win N`. Persistent right pane lists every contact. Top bar: node name, serial port, radio settings, GPS/advertised location, battery. Bottom bar: clock, `N:name` for every window (names shortened with `…` when too narrow; unread windows in red, bold red for new messages), `[disconnected]`. |
 | `/whois` / `/status` | `/whois` prints cached contact info only (pubkey shown as first 16 bytes). `/status` sends a binary status request and prints the response (or a timeout notice) when it arrives. Only repeaters/rooms answer. |
 | Contact addressing | Names may contain spaces, so `/msg` / `/query` / `/whois` accept: exact name, unique case-insensitive name prefix, or public-key hex prefix (≥ 4 hex chars). Ambiguity → error listing the candidates. Tab-completion in the input line resolves names. |
 | Config | CLI flags via `clap`, with optional `~/.config/meshirc/config.toml` for the same values (`port`, `baud`, `log_dir`, `history_lines`, `auto_join = ["#foo"]`). CLI overrides file. |
@@ -123,7 +123,7 @@ src/
     mod.rs        draw(): layout = [main chat | sidebar] / status bar / input
     chat.rs       scrollback Paragraph with wrap + scroll offset
     sidebar.rs    contact list
-    statusbar.rs  "[1:status] [2:#lt] … [act: 3]  MyNode  bat 87%"
+    statusbar.rs  "[1:status] [2:#lt] …  MyNode  bat 87%" (unread windows red)
   logs.rs         per-window append-only log writer + tail reader
   event.rs        AppEvent enum, terminal input task
 ```
