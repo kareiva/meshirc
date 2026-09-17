@@ -254,14 +254,38 @@ impl App {
     }
 
     fn open_window(&mut self, kind: WindowKind) -> usize {
+        self.insert_window(self.windows.len(), kind)
+    }
+
+    /// Open a channel window at its slot-ordered position (the layout startup
+    /// produces), so rejoining a freed slot gets its old window number back
+    /// instead of landing at the end.
+    fn channel_window(&mut self, idx: u8, name: String) -> usize {
+        let slot = |w: &Window| match &w.kind {
+            WindowKind::Channel { idx, .. } => Some(*idx),
+            _ => None,
+        };
+        let pos = self
+            .windows
+            .iter()
+            .position(|w| slot(w).is_some_and(|i| i > idx))
+            .or_else(|| self.windows.iter().rposition(|w| slot(w).is_some()).map(|p| p + 1))
+            .unwrap_or(self.windows.len());
+        self.insert_window(pos, WindowKind::Channel { idx, name })
+    }
+
+    fn insert_window(&mut self, pos: usize, kind: WindowKind) -> usize {
         let w = Window { kind, lines: vec![], scroll: 0, activity: 0 };
         let history = if self.cfg.save_private || !matches!(w.kind, WindowKind::Query { .. }) {
             self.logs.tail(&w.log_name(), self.cfg.history_lines)
         } else {
             vec![]
         };
-        self.windows.push(w);
-        let idx = self.windows.len() - 1;
+        self.windows.insert(pos, w);
+        let idx = pos;
+        if pos < self.windows.len() - 1 {
+            self.shift_windows(pos, 1);
+        }
         for h in history {
             let (time, text) = match h.get(..19) {
                 Some(t) if t.is_ascii() => (t.get(11..16).unwrap_or("").to_string(), &h[19..]),
@@ -270,6 +294,37 @@ impl App {
             self.windows[idx].lines.push(Line { time, kind: LineKind::History, text: text.trim_start().to_string() });
         }
         idx
+    }
+
+    fn remove_window(&mut self, i: usize) {
+        self.windows.remove(i);
+        self.pending_sends.retain(|p| p.window != i);
+        self.pending_acks.retain(|_, (win, _)| *win != i);
+        self.shift_windows(i + 1, -1);
+        if self.active >= self.windows.len() || self.active == i {
+            self.active = i.saturating_sub(1).min(self.windows.len() - 1);
+        } else if self.active > i {
+            self.active -= 1;
+        }
+    }
+
+    /// Renumber every window index >= `from` by `delta` in state that refers to
+    /// windows by position (pending marks, active window).
+    fn shift_windows(&mut self, from: usize, delta: isize) {
+        let fix = |w: &mut usize| {
+            if *w >= from {
+                *w = (*w as isize + delta) as usize;
+            }
+        };
+        for p in &mut self.pending_sends {
+            fix(&mut p.window);
+        }
+        for (win, _) in self.pending_acks.values_mut() {
+            fix(win);
+        }
+        if delta > 0 {
+            fix(&mut self.active);
+        }
     }
 
     fn switch(&mut self, idx: usize) {
@@ -288,8 +343,7 @@ impl App {
             let _ = self.radio.try_send(RadioCmd::PartChannel { idx, name });
             return;
         }
-        self.windows.remove(self.active);
-        self.active = self.active.min(self.windows.len() - 1);
+        self.remove_window(self.active);
     }
 
     fn query_window(&mut self, contact: Option<&Contact>, prefix: &[u8; 6]) -> usize {
@@ -842,7 +896,7 @@ impl App {
 
     fn join(&mut self, name: &str, key: Option<[u8; 16]>) {
         if let Some(idx) = self.slots.idx_of(name) {
-            let win = self.find_channel(idx).unwrap_or_else(|| self.open_window(WindowKind::Channel { idx, name: name.to_string() }));
+            let win = self.find_channel(idx).unwrap_or_else(|| self.channel_window(idx, name.to_string()));
             self.switch(win);
             return;
         }
@@ -953,7 +1007,7 @@ impl App {
             RadioReply::SlotInUse { idx, name } => {
                 self.slots.set(idx, name.clone());
                 if self.find_channel(idx).is_none() {
-                    self.open_window(WindowKind::Channel { idx, name: name.clone() });
+                    self.channel_window(idx, name.clone());
                 }
                 self.notice(0, &format!("channel slot {idx}: {name}"));
             }
@@ -975,19 +1029,14 @@ impl App {
             }
             RadioReply::Joined { idx, name } => {
                 self.slots.set(idx, name.clone());
-                let win = self.open_window(WindowKind::Channel { idx, name: name.clone() });
+                let win = self.find_channel(idx).unwrap_or_else(|| self.channel_window(idx, name.clone()));
                 self.switch(win);
                 self.notice(win, &format!("joined {name} (slot {idx})"));
             }
             RadioReply::Parted { idx, name } => {
                 self.slots.clear(idx);
                 if let Some(i) = self.find_channel(idx) {
-                    self.windows.remove(i);
-                    if self.active >= self.windows.len() || self.active == i {
-                        self.active = i.saturating_sub(1).min(self.windows.len() - 1);
-                    } else if self.active > i {
-                        self.active -= 1;
-                    }
+                    self.remove_window(i);
                 }
                 self.notice(0, &format!("left {name}"));
             }
@@ -1055,7 +1104,7 @@ impl App {
                     Some(w) => w,
                     None => {
                         let name = self.slots.name(m.channel_idx).map(String::from).unwrap_or_else(|| format!("#slot{}", m.channel_idx));
-                        self.open_window(WindowKind::Channel { idx: m.channel_idx, name })
+                        self.channel_window(m.channel_idx, name)
                     }
                 };
                 let (nick, body) = m.text.split_once(": ").unwrap_or(("?", m.text.as_str()));
@@ -1539,5 +1588,44 @@ mod tests {
         app.execute(Command::Wipe(WipeTarget::All));
         assert!(app.logs.list().is_empty());
         let _ = std::fs::remove_dir_all(&app.cfg.log_dir);
+    }
+
+    fn names(app: &App) -> Vec<String> {
+        app.windows.iter().map(|w| w.name()).collect()
+    }
+
+    #[test]
+    fn parted_slot_and_window_position_are_reused() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(app_in("slots", 0).cfg, tx).unwrap();
+        app.connected = true;
+        app.slots = SlotTable::new(8);
+        for (i, n) in ["Public", "#a", "#b", "#c", "#d"].iter().enumerate() {
+            app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: i as u8, name: n.to_string() }));
+        }
+        app.open_window(WindowKind::Query { prefix: [1; 6], name: "Q".into() });
+        app.switch(5); // #d
+        app.pending_sends.push(PendingSend { window: 5, line: 0, kind: PktKind::Channel, payload_len: 0, deadline: Instant::now() });
+
+        app.handle(AppEvent::Reply(RadioReply::Parted { idx: 3, name: "#c".into() }));
+        assert_eq!(names(&app), ["status", "Public", "#a", "#b", "#d", "Q"]);
+        assert_eq!(app.active, 4, "active window follows #d down");
+        assert_eq!(app.pending_sends[0].window, 4);
+
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)));
+        for c in "join #e".chars() {
+            app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let idx = match rx.try_recv() {
+            Ok(RadioCmd::JoinChannel { idx, .. }) => idx,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(idx, 3, "freed radio slot is reused");
+
+        app.handle(AppEvent::Reply(RadioReply::Joined { idx, name: "#e".into() }));
+        assert_eq!(names(&app), ["status", "Public", "#a", "#b", "#e", "#d", "Q"]);
+        assert_eq!(app.active, 4);
+        assert_eq!(app.pending_sends[0].window, 5, "pending mark follows #d up");
     }
 }
