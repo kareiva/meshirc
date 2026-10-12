@@ -14,15 +14,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1), Constraint::Length(1)])
         .split(f.area());
+    let sidebar_w = if app.show_sidebar { sidebar::WIDTH } else { 0 };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(sidebar::WIDTH)])
+        .constraints([Constraint::Min(20), Constraint::Length(sidebar_w)])
         .split(rows[1]);
 
     app.page_height = cols[0].height as usize;
     statusbar::draw_top(f, app, rows[0]);
     chat::draw(f, app, cols[0]);
-    sidebar::draw(f, app, cols[1]);
+    if app.show_sidebar {
+        sidebar::draw(f, app, cols[1]);
+    }
     statusbar::draw_bottom(f, app, rows[2]);
     draw_input(f, app, rows[3]);
     draw_mentions(f, app, cols[0], rows[3]);

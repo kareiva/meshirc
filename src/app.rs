@@ -153,6 +153,9 @@ pub struct App {
     pub selected_contact: Option<[u8; 32]>,
     pub sidebar_height: usize,
     pub mention: Option<Mention>,
+    /// Contact sidebar visible. Hidden (`F2`, `/set sidebar off`) the chat spans
+    /// the whole width, so terminal selection copies clean lines.
+    pub show_sidebar: bool,
 }
 
 fn now_hms() -> String {
@@ -196,6 +199,7 @@ impl App {
             selected_contact: None,
             sidebar_height: 20,
             mention: None,
+            show_sidebar: true,
             cfg,
         };
         app.notice(0, "MeshIRC — /help for commands");
@@ -442,20 +446,43 @@ impl App {
 
     fn set(&mut self, key: Option<String>, value: Option<String>) {
         let active = self.active;
-        let show = |app: &mut App| {
-            let v = if app.cfg.save_private { "on" } else { "off" };
-            app.notice(active, &format!("save_private = {v}  (log private messages, reopen private windows on start)"));
+        let onoff = |b: bool| if b { "on" } else { "off" };
+        let show_save_private = |app: &mut App| {
+            app.notice(active, &format!("save_private = {}  (log private messages, reopen private windows on start)", onoff(app.cfg.save_private)));
+        };
+        let show_sidebar = |app: &mut App| {
+            app.notice(active, &format!("sidebar = {}  (contact list; F2 toggles)", onoff(app.show_sidebar)));
+        };
+        let parse_bool = |app: &mut App, key: &str, value: Option<String>| -> Option<bool> {
+            match value?.to_lowercase().as_str() {
+                "on" | "true" | "yes" | "1" => Some(true),
+                "off" | "false" | "no" | "0" => Some(false),
+                _ => {
+                    app.error(&format!("usage: /set {key} on|off"));
+                    None
+                }
+            }
         };
         match key.as_deref() {
-            None => show(self),
+            None => {
+                show_save_private(self);
+                show_sidebar(self);
+            }
+            Some("sidebar") => {
+                if value.is_none() {
+                    return show_sidebar(self);
+                }
+                if let Some(on) = parse_bool(self, "sidebar", value) {
+                    self.set_sidebar(on);
+                }
+            }
             Some("save_private") => {
-                let Some(value) = value else { return show(self) };
-                let on = match value.to_lowercase().as_str() {
-                    "on" | "true" | "yes" | "1" => true,
-                    "off" | "false" | "no" | "0" => false,
-                    _ => return self.error("usage: /set save_private on|off"),
-                };
+                if value.is_none() {
+                    return show_save_private(self);
+                }
+                let Some(on) = parse_bool(self, "save_private", value) else { return };
                 self.cfg.save_private = on;
+                let show = show_save_private;
                 show(self);
                 if on {
                     let n = self.restore_queries();
@@ -467,7 +494,14 @@ impl App {
                 }
                 self.notice(active, "for this session only; put save_private = true|false in config.toml to persist");
             }
-            Some(k) => self.error(&format!("unknown setting '{k}'; settings: save_private")),
+            Some(k) => self.error(&format!("unknown setting '{k}'; settings: save_private, sidebar")),
+        }
+    }
+
+    fn set_sidebar(&mut self, on: bool) {
+        self.show_sidebar = on;
+        if !on && self.focus == Focus::Contacts {
+            self.focus = Focus::Input;
         }
     }
 
@@ -506,6 +540,7 @@ impl App {
                 let n = (self.active + self.windows.len() - 1) % self.windows.len();
                 self.switch(n);
             }
+            (KeyCode::F(2), _, _) => self.set_sidebar(!self.show_sidebar),
             (KeyCode::PageUp, _, _) if self.focus == Focus::Contacts => self.move_selection(-(self.sidebar_height as i64)),
             (KeyCode::PageDown, _, _) if self.focus == Focus::Contacts => self.move_selection(self.sidebar_height as i64),
             (KeyCode::PageUp, _, _) => self.scroll_chat(self.page_height as i64 / 2),
@@ -513,8 +548,8 @@ impl App {
             (KeyCode::Tab, _, _) if self.focus != Focus::Input || self.input.value().is_empty() => {
                 self.focus = match self.focus {
                     Focus::Input => Focus::Chat,
-                    Focus::Chat => Focus::Contacts,
-                    Focus::Contacts => Focus::Input,
+                    Focus::Chat if self.show_sidebar => Focus::Contacts,
+                    Focus::Chat | Focus::Contacts => Focus::Input,
                 };
                 if self.focus == Focus::Contacts && self.selected_contact.is_none() {
                     self.selected_contact = self.contacts.sorted().first().map(|c| c.public_key);
@@ -522,9 +557,9 @@ impl App {
             }
             (KeyCode::BackTab, _, _) => {
                 self.focus = match self.focus {
-                    Focus::Input => Focus::Contacts,
+                    Focus::Input if self.show_sidebar => Focus::Contacts,
+                    Focus::Input | Focus::Contacts => Focus::Chat,
                     Focus::Chat => Focus::Input,
-                    Focus::Contacts => Focus::Chat,
                 };
             }
             (KeyCode::Esc, _, _) if self.mention.is_some() => self.mention = None,
@@ -829,6 +864,24 @@ impl App {
                     }
                 }
             }
+            Command::Trace(who) => {
+                if let Some(c) = self.target_or_error(who.as_deref(), "trace") {
+                    match contacts::trace_path(&c) {
+                        Ok(t) => {
+                            let window = self.active;
+                            let route = self.route_names(&t.path, t.hash_size).join(" → ");
+                            let cmd = RadioCmd::Trace { name: c.adv_name.clone(), path: t.path, flags: t.flags, window };
+                            if self.send_radio(cmd) {
+                                self.notice(window, &format!("tracing {}: me → {route} → me", c.adv_name));
+                                if !t.reaches_contact {
+                                    self.notice(window, "  (chat nodes don't relay traces; it turns around at their last repeater)");
+                                }
+                            }
+                        }
+                        Err(e) => self.error(&e),
+                    }
+                }
+            }
             Command::Contacts => {
                 self.send_radio(RadioCmd::RefreshContacts);
                 self.notice(self.active, "refreshing contacts...");
@@ -988,6 +1041,27 @@ impl App {
         }
     }
 
+    /// Hop labels for a trace path: `hash` or `hash Name` when the hash identifies one contact.
+    fn route_names(&self, path: &[u8], hash_size: usize) -> Vec<String> {
+        path.chunks(hash_size)
+            .map(|h| match self.contacts.by_hash(h) {
+                Some(c) => format!("{} {}", hex::encode(h), c.adv_name),
+                None => hex::encode(h),
+            })
+            .collect()
+    }
+
+    fn print_trace(&mut self, win: usize, name: &str, path: &[u8], flags: u8, snrs: &[f32], final_snr: f32) {
+        let hops = self.route_names(path, 1 << (flags & 3));
+        self.notice(win, &format!("trace {name}: {} hops", hops.len()));
+        let mut from = "me".to_string();
+        for (to, snr) in hops.iter().zip(snrs) {
+            self.notice(win, &format!("  {from} → {to}  snr {snr:+.2} dB"));
+            from = to.clone();
+        }
+        self.notice(win, &format!("  {from} → me  snr {final_snr:+.2} dB"));
+    }
+
     // ----- radio -----
 
     fn on_reply(&mut self, r: RadioReply) {
@@ -1067,6 +1141,9 @@ impl App {
                 self.error(&error);
             }
             RadioReply::Status { window, name, status } => self.print_status(window, &name, &status),
+            RadioReply::Trace { window, name, path, flags, snrs, final_snr } => {
+                self.print_trace(window, &name, &path, flags, &snrs, final_snr)
+            }
             RadioReply::Battery { mv, pct } => self.battery = Some((mv, pct)),
             RadioReply::Gps(status) => self.gps = Some(status),
             RadioReply::Notice { window, text } => {
@@ -1394,6 +1471,26 @@ mod tests {
         assert!(!matches!(app.windows[win].lines.last().unwrap().kind, LineKind::Error));
         app.execute(Command::Status(None));
         assert_eq!(app.windows[win].lines.last().unwrap().text, "requesting status from Bob...");
+        app.execute(Command::Trace(None));
+        assert!(app.windows[win].lines.last().unwrap().text.contains("no known route to Bob"));
+    }
+
+    #[test]
+    fn trace_result_lists_hops() {
+        let mut app = mention_app();
+        let mut rpt = contact("Hill", 0xa1);
+        rpt.contact_type = contacts::TYPE_REPEATER;
+        app.contacts.upsert(rpt);
+        app.handle(AppEvent::Reply(RadioReply::Trace {
+            window: 0,
+            name: "Bob".into(),
+            path: vec![0xa1, 0xb2, 0xa1],
+            flags: 0,
+            snrs: vec![7.25, -3.5, 6.0],
+            final_snr: 5.5,
+        }));
+        let text: Vec<&str> = app.windows[0].lines.iter().rev().take(4).map(|l| l.text.as_str()).collect();
+        assert_eq!(text, ["  a1 Hill → me  snr +5.50 dB", "  b2 → a1 Hill  snr +6.00 dB", "  a1 Hill → b2  snr -3.50 dB", "  me → a1 Hill  snr +7.25 dB"]);
     }
 
     #[test]

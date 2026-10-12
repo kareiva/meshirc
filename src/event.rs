@@ -20,6 +20,8 @@ pub enum RadioCmd {
     JoinChannel { idx: u8, name: String, secret: [u8; 16] },
     PartChannel { idx: u8, name: String },
     Whois { contact: Contact, window: usize },
+    /// `path` / `flags` as built by `contacts::trace_path`.
+    Trace { name: String, path: Vec<u8>, flags: u8, window: usize },
     RefreshContacts,
     Advert { flood: bool },
     SetName(String),
@@ -40,6 +42,8 @@ pub enum RadioReply {
     ChannelSent { window: usize, line: usize },
     SendFailed { window: usize, line: usize, error: String },
     Status { window: usize, name: String, status: StatusData },
+    /// SNR (dB) at which each hop of `path` heard the trace, then at which we heard the last hop.
+    Trace { window: usize, name: String, path: Vec<u8>, flags: u8, snrs: Vec<f32>, final_snr: f32 },
     Battery { mv: u16, pct: u8 },
     /// Reply to the firmware `gps` CLI command (`on, active, fix, 7 sats` / `off`); `None` if unsupported.
     Gps(Option<String>),

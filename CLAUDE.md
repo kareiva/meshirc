@@ -72,6 +72,10 @@ These come from the MeshCore companion protocol and from reading `meshcore-rs` s
   the device owns packet formats.
 - **Markers**: `○` pending, green `●` heard/`●●` acked, red `●` failed (60 s
   without a repeat, or DM ack timeout). Failed never overrides heard/acked.
+- **Traces.** meshcore-rs 0.2 has no trace call and its `TraceData` parser doesn't match the
+  firmware layout, so `radio::trace` sends `CMD_SEND_TRACE_PATH` (36) raw and reads the result
+  from the trace packet's `LogData` (header path = one SNR byte per hop, payload starts with our tag).
+  `Contact.path_len` packs hop count (low 6 bits) and hash size − 1 (top 2 bits); `0xff` = flood.
 - **Text limit** is 160 bytes per message. Reject or split longer input.
 - **`send_msg` needs a `Contact`** (or 6-byte pubkey prefix) — never a name.
 
@@ -234,18 +238,19 @@ match ev.payload {
 | `/query <who>` | Open a query window without sending. |
 | `/whois [who]` | Print cached fields. `who` may be omitted in a query window (targets that node). |
 | `/status [who]` | `send_binary_req(Status)` async; print result in the issuing window. `who` optional in a query window. |
+| `/trace [who]` | Round-trip trace along the contact's learned `out_path` (`a b C b a` for repeaters/rooms; `a b b a` for chat nodes, which don't relay traces). Prints per-hop SNR. `who` optional in a query window. Flood-routed contacts (no path) → error. |
 | `/contacts` | Force `get_contacts(0)` refresh. |
 | `/advert` | `send_advert(false)` — local zero-hop advert. `/advert flood` for flood. |
 | `/win N`, `/close` | Window management. |
 | `/nick <name>` | `set_name` on the radio (optional, low priority). |
-| `/set [key [value]]` | Show/change session settings; only `save_private on\|off` so far. Not persisted (config file does that). |
+| `/set [key [value]]` | Show/change session settings: `save_private on\|off`, `sidebar on\|off` (hide the contact list so terminal selection copies clean chat lines; `F2` toggles). Not persisted (config file does that). |
 | `/wipe [target]` | Delete history: active window (default), `<window>` by name, `channels`, `private`, `all`. Clears scrollback, drops the window's pending marks and deletes the log file(s), including logs of windows that are not open. No confirmation. |
 | `/help`, `/quit` | Obvious. |
 | plain text | Send to the active window: channel → `send_channel_msg`, query → `send_msg`, status → error. |
 
 ## Keybindings
 
-`Alt+0..9` / `Ctrl+N` / `Ctrl+P` switch windows · `PgUp`/`PgDn` scroll · `Tab` complete contact/channel names · `Up`/`Down` input history · `Ctrl+C` / `/quit` exit.
+`Alt+0..9` / `Ctrl+N` / `Ctrl+P` switch windows · `F2` hide/show contact sidebar · `PgUp`/`PgDn` scroll · `Tab` complete contact/channel names · `Up`/`Down` input history · `Ctrl+C` / `/quit` exit.
 
 `@`-mentions (`App::mention`): typing `@` arms a mention at the cursor; the following characters
 (spaces included, since names contain spaces) filter `ContactBook::complete`. While there are

@@ -56,6 +56,18 @@ impl ContactBook {
         self.by_key.values().find(|c| c.public_key.starts_with(prefix))
     }
 
+    /// Name of the node whose pubkey starts with the path hash `h`, if that is unambiguous
+    /// (repeaters/rooms win over chat nodes, which don't relay).
+    pub fn by_hash(&self, h: &[u8]) -> Option<&Contact> {
+        let hits: Vec<&Contact> = self.by_key.values().filter(|c| c.public_key.starts_with(h)).collect();
+        let relays: Vec<&Contact> = hits.iter().copied().filter(|c| c.contact_type != TYPE_CHAT).collect();
+        match (relays.len(), hits.len()) {
+            (1, _) => Some(relays[0]),
+            (0, 1) => Some(hits[0]),
+            _ => None,
+        }
+    }
+
     pub fn last_advert(&self, c: &Contact) -> u32 {
         self.last_seen
             .get(&c.prefix())
@@ -123,6 +135,52 @@ impl ContactBook {
     }
 }
 
+/// Route for a `/trace`, as sent in `CMD_SEND_TRACE_PATH`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TracePath {
+    /// Hop hashes, `hash_size` bytes each.
+    pub path: Vec<u8>,
+    /// Trace flags: low 2 bits = log2(hash size).
+    pub flags: u8,
+    pub hash_size: usize,
+    /// Whether the contact itself is on the path (repeaters/rooms). Chat nodes don't relay
+    /// traces, so for them the trace turns around at the last repeater before them.
+    pub reaches_contact: bool,
+}
+
+/// Round-trip trace route to `c` from its learned out path: `a b C b a` for a repeater/room,
+/// `a b b a` for a chat node. `path_len` encodes the hop count in the low 6 bits and
+/// hash size − 1 in the top 2 (0xff = flood, no known route).
+pub fn trace_path(c: &Contact) -> Result<TracePath, String> {
+    let name = &c.adv_name;
+    let b = c.path_len as u8;
+    if b == 0xff {
+        return Err(format!("no known route to {name} (flood); a trace needs a direct path, learned when they reply"));
+    }
+    let hops = (b & 0x3f) as usize;
+    let hash_size = (b >> 6) as usize + 1;
+    let flags = match hash_size {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        n => return Err(format!("can't trace {n}-byte path hashes")),
+    };
+    let out = c
+        .out_path
+        .get(..hops * hash_size)
+        .ok_or_else(|| format!("route to {name} is incomplete ({})", hex::encode(&c.out_path)))?;
+    let reaches_contact = c.contact_type != TYPE_CHAT;
+    if !reaches_contact && hops == 0 {
+        return Err(format!("{name} is a direct neighbour and chat nodes don't relay traces; nothing to trace"));
+    }
+    let mut path = out.to_vec();
+    if reaches_contact {
+        path.extend_from_slice(&c.public_key[..hash_size]);
+    }
+    path.extend(out.chunks(hash_size).rev().flatten());
+    Ok(TracePath { path, flags, hash_size, reaches_contact })
+}
+
 pub fn age(now: u32, then: u32) -> String {
     if then == 0 {
         return "-".into();
@@ -175,5 +233,34 @@ mod tests {
         assert!(matches!(b.resolve("alice"), Resolve::One(c) if c.adv_name == "Alice Node"));
         assert!(matches!(b.resolve("03ab"), Resolve::One(c) if c.adv_name == "Bob"));
         assert!(matches!(b.resolve("zzz"), Resolve::None));
+    }
+
+    #[test]
+    fn trace_paths() {
+        let mut c = mk("Rpt", 0xc3);
+        c.contact_type = TYPE_REPEATER;
+        assert!(trace_path(&c).unwrap_err().contains("flood"));
+        c.path_len = 0;
+        assert_eq!(trace_path(&c).unwrap().path, vec![0xc3]);
+        c.path_len = 2;
+        c.out_path = vec![0xa1, 0xb2];
+        let t = trace_path(&c).unwrap();
+        assert_eq!((t.path, t.flags, t.reaches_contact), (vec![0xa1, 0xb2, 0xc3, 0xb2, 0xa1], 0, true));
+        // 2-byte hashes: top bits of path_len = 1
+        c.path_len = 0x42;
+        c.out_path = vec![0xa1, 0xa2, 0xb1, 0xb2];
+        let t = trace_path(&c).unwrap();
+        assert_eq!((t.path, t.flags), (vec![0xa1, 0xa2, 0xb1, 0xb2, 0xc3, 0xab, 0xb1, 0xb2, 0xa1, 0xa2], 1));
+        // chat node: turn around at the last repeater
+        c.contact_type = TYPE_CHAT;
+        c.path_len = 2;
+        c.out_path = vec![0xa1, 0xb2];
+        let t = trace_path(&c).unwrap();
+        assert_eq!((t.path, t.reaches_contact), (vec![0xa1, 0xb2, 0xb2, 0xa1], false));
+        c.path_len = 0;
+        assert!(trace_path(&c).unwrap_err().contains("direct neighbour"));
+        // out_path truncated by a 0x00 hash byte
+        c.path_len = 3;
+        assert!(trace_path(&c).unwrap_err().contains("incomplete"));
     }
 }

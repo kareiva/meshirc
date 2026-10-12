@@ -1,10 +1,11 @@
 use crate::event::{AppEvent, RadioCmd, RadioReply};
 use futures::StreamExt;
 use meshcore_rs::events::{EventDispatcher, EventPayload};
-use meshcore_rs::{BinaryReqType, EventType, MeshCore};
+use meshcore_rs::{BinaryReqType, EventType, MeshCore, PayloadType};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
@@ -139,6 +140,19 @@ async fn handle_cmd(cmd: RadioCmd, cmds: &Cmds, dispatcher: &Arc<EventDispatcher
                 }
             });
         }
+        RadioCmd::Trace { name, path, flags, window } => {
+            let cmds = cmds.clone();
+            let dispatcher = dispatcher.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let r = match trace(&cmds, &dispatcher, &path, flags).await {
+                    Ok(Some((snrs, final_snr))) => RadioReply::Trace { window, name, path, flags, snrs, final_snr },
+                    Ok(None) => RadioReply::Notice { window: Some(window), text: format!("trace {name}: no reply (timeout)") },
+                    Err(e) => RadioReply::Error(format!("trace {name}: {e}")),
+                };
+                reply(&tx, r).await;
+            });
+        }
         RadioCmd::RefreshContacts => match cmds.lock().await.get_contacts(0).await {
             Ok(list) => reply(tx, RadioReply::Contacts(list)).await,
             Err(e) => reply(tx, RadioReply::Error(format!("get_contacts: {e}"))).await,
@@ -182,6 +196,56 @@ async fn cli_command(cmds: &Cmds, text: &str) -> anyhow::Result<String> {
         EventPayload::Bytes(b) => anyhow::bail!("unexpected frame {:02x?}", b.first()),
         other => anyhow::bail!("{other:?}"),
     }
+}
+
+/// `CMD_SEND_TRACE_PATH` (36): tag(4) auth(4) flags(1) path. meshcore-rs 0.2 has no call for
+/// it and its `TraceData` parser doesn't match the firmware's `PUSH_CODE_TRACE_DATA` layout, so
+/// the result is read from the trace packet's own `LogData` instead: every relay appends the SNR it
+/// heard the packet at to the (unencrypted) path, and the copy we hear after the last hop carries
+/// one SNR per hop. Returns those SNRs and our own receive SNR, or `None` on timeout.
+const CMD_SEND_TRACE_PATH: u8 = 36;
+
+async fn trace(
+    cmds: &Cmds,
+    dispatcher: &EventDispatcher,
+    path: &[u8],
+    flags: u8,
+) -> anyhow::Result<Option<(Vec<f32>, f32)>> {
+    let mut events = dispatcher.receiver();
+    let tag = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u32).unwrap_or(0).to_le_bytes();
+    let mut data = vec![CMD_SEND_TRACE_PATH];
+    data.extend_from_slice(&tag);
+    data.extend_from_slice(&[0; 4]);
+    data.push(flags);
+    data.extend_from_slice(path);
+    let ev = cmds
+        .lock()
+        .await
+        .send_multi(&data, &[EventType::MsgSent, EventType::Error], Duration::from_secs(5))
+        .await?;
+    let timeout = match ev.payload {
+        EventPayload::MsgSent(info) => Duration::from_millis(info.suggested_timeout as u64) + Duration::from_secs(5),
+        EventPayload::String(e) => anyhow::bail!("{e}"),
+        other => anyhow::bail!("{other:?}"),
+    };
+    let hops = path.len() >> (flags & 3);
+    let wait = async {
+        loop {
+            match events.recv().await {
+                Ok(ev) => {
+                    let EventPayload::LogData(log) = ev.payload else { continue };
+                    let Some(h) = &log.header else { continue };
+                    if h.payload_type == PayloadType::Trace && log.payload.starts_with(&tag) && h.path.len() >= hops {
+                        let snrs = h.path[..hops].iter().map(|&b| b as i8 as f32 / 4.0).collect();
+                        return Some((snrs, log.snr));
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return None,
+            }
+        }
+    };
+    Ok(tokio::time::timeout(timeout, wait).await.ok().flatten())
 }
 
 /// Same as meshcore-cli's `gps`: the firmware prints `on, {active|deactivated}, {fix|no fix}, N sats`

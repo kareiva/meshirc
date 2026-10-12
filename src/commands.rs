@@ -6,6 +6,7 @@ pub enum Command {
     Query(String),
     Whois(Option<String>),
     Status(Option<String>),
+    Trace(Option<String>),
     Contacts,
     Advert { flood: bool },
     Win(usize),
@@ -72,6 +73,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "query" | "q" => arg(Command::Query(rest.to_string())),
         "whois" | "wi" => Command::Whois(opt(rest)),
         "status" | "st" => Command::Status(opt(rest)),
+        "trace" | "tr" => Command::Trace(opt(rest)),
         "contacts" | "who" => Command::Contacts,
         "advert" => Command::Advert { flood: rest.eq_ignore_ascii_case("flood") },
         "win" | "window" | "w" => match rest.parse() {
@@ -114,11 +116,13 @@ pub const HELP: &[&str] = &[
     "/query <who>       open a private window",
     "/whois [who]       cached contact info (who defaults to the private window's node)",
     "/status [who]      request live status over the mesh (repeaters/rooms)",
+    "/trace [who]       trace the route to a node and back, with per-hop SNR",
     "/contacts          refresh contact list from radio",
     "/advert [flood]    send self advertisement",
     "/win N  /close     switch / close window (also Alt+N, Ctrl+N/P)",
     "/nick <name>       set radio node name",
-    "/set [key] [val]   show or change settings (save_private on|off)",
+    "/set [key] [val]   show or change settings (save_private on|off, sidebar on|off)",
+    "F2                 hide/show the contact list (copy chat lines without it)",
     "/wipe [target]     delete history: this window, <window>, channels, private, all",
     "/quit              exit",
 ];
@@ -139,6 +143,8 @@ mod tests {
         assert_eq!(parse("/part"), Some(Command::Part(None)));
         assert_eq!(parse("/whois"), Some(Command::Whois(None)));
         assert_eq!(parse("/status Bob"), Some(Command::Status(Some("Bob".into()))));
+        assert_eq!(parse("/trace"), Some(Command::Trace(None)));
+        assert_eq!(parse("/trace LY2EN"), Some(Command::Trace(Some("LY2EN".into()))));
         assert_eq!(
             parse("/msg Bob hi there"),
             Some(Command::Msg { who: "Bob".into(), text: "hi there".into() })
