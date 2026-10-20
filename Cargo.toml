@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 meshcore-rs = { version = "0.2", default-features = false, features = ["serial"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 tui-input = "0.15"
@@ -22,6 +22,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+serde_json = "1"
 
 [profile.release]
 strip = true

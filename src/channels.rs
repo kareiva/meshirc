@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SECRET_LEN: usize = 16;
 pub const MAX_TEXT_BYTES: usize = 160;
@@ -38,18 +38,32 @@ pub fn secret_for(name: &str) -> [u8; SECRET_LEN] {
     }
 }
 
+/// Whether anyone who knows the channel name can derive `secret`: the well-known Public key, or
+/// `sha256("#name")` (with or without the `#` / case as stored in the slot). Anything else is a
+/// custom key, i.e. a private channel.
+pub fn key_is_derived(name: &str, secret: &[u8; SECRET_LEN]) -> bool {
+    let bare = name.trim().trim_start_matches('#');
+    *secret == PUBLIC_KEY
+        || [bare.to_string(), bare.to_lowercase()]
+            .iter()
+            .any(|b| hashtag_secret(&format!("#{b}")) == *secret)
+}
+
 #[derive(Debug, Default)]
 pub struct SlotTable {
     pub max: u8,
     slots: BTreeMap<u8, String>,
+    /// Slots whose secret is not derived from the name (`key_is_derived`).
+    custom_key: BTreeSet<u8>,
 }
 
 impl SlotTable {
     pub fn new(max: u8) -> Self {
-        Self { max, slots: BTreeMap::new() }
+        Self { max, ..Self::default() }
     }
 
     pub fn set(&mut self, idx: u8, name: String) {
+        self.custom_key.remove(&idx);
         if name.is_empty() {
             self.slots.remove(&idx);
         } else {
@@ -59,6 +73,23 @@ impl SlotTable {
 
     pub fn clear(&mut self, idx: u8) {
         self.slots.remove(&idx);
+        self.custom_key.remove(&idx);
+    }
+
+    /// Record the slot's secret (after `set`), marking it private if not derived from the name.
+    pub fn set_secret(&mut self, idx: u8, secret: &[u8; SECRET_LEN]) {
+        match self.slots.get(&idx) {
+            Some(name) if !key_is_derived(name, secret) => {
+                self.custom_key.insert(idx);
+            }
+            _ => {
+                self.custom_key.remove(&idx);
+            }
+        }
+    }
+
+    pub fn has_custom_key(&self, idx: u8) -> bool {
+        self.custom_key.contains(&idx)
     }
 
     pub fn name(&self, idx: u8) -> Option<&str> {
@@ -91,6 +122,25 @@ mod tests {
         let full = Sha256::digest(b"#test");
         assert_eq!(&s[..], &full[..16]);
         assert_ne!(s, PUBLIC_KEY);
+    }
+
+    #[test]
+    fn derived_and_custom_keys() {
+        assert!(key_is_derived("Public", &PUBLIC_KEY));
+        assert!(key_is_derived("#test", &hashtag_secret("#test")));
+        assert!(key_is_derived("test", &hashtag_secret("#test")));
+        assert!(key_is_derived("Hiking", &hashtag_secret("#hiking")));
+        assert!(!key_is_derived("#test", &[7; SECRET_LEN]));
+        let mut t = SlotTable::new(3);
+        t.set(1, "#team".into());
+        t.set_secret(1, &[7; SECRET_LEN]);
+        assert!(t.has_custom_key(1));
+        t.set(1, "#team".into());
+        t.set_secret(1, &hashtag_secret("#team"));
+        assert!(!t.has_custom_key(1));
+        t.set_secret(1, &[7; SECRET_LEN]);
+        t.clear(1);
+        assert!(!t.has_custom_key(1));
     }
 
     #[test]
