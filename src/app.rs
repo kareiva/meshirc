@@ -151,6 +151,8 @@ pub struct App {
     pub page_height: usize,
     pub focus: Focus,
     pub selected_contact: Option<[u8; 32]>,
+    /// Contact awaiting a yes/no in the "remove from contact list?" dialog (`Delete` in the sidebar).
+    pub confirm_remove: Option<[u8; 32]>,
     pub sidebar_height: usize,
     pub mention: Option<Mention>,
     /// Contact sidebar visible. Hidden (`F2`, `/set sidebar off`) the chat spans
@@ -197,6 +199,7 @@ impl App {
             page_height: 20,
             focus: Focus::Input,
             selected_contact: None,
+            confirm_remove: None,
             sidebar_height: 20,
             mention: None,
             show_sidebar: true,
@@ -529,6 +532,21 @@ impl App {
     fn on_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if let Some(key) = self.confirm_remove {
+            if k.code == KeyCode::Char('c') && ctrl {
+                self.should_quit = true;
+            } else if matches!(k.code, KeyCode::Char('y' | 'Y')) {
+                self.confirm_remove = None;
+                if let Some(c) = self.contacts.by_prefix(&key).cloned() {
+                    if self.send_radio(RadioCmd::RemoveContact { contact: c.clone() }) {
+                        self.notice(self.active, &format!("removing {} from contacts...", c.adv_name));
+                    }
+                }
+            } else {
+                self.confirm_remove = None;
+            }
+            return;
+        }
         match (k.code, ctrl, alt) {
             (KeyCode::Char('c'), true, _) => self.should_quit = true,
             (KeyCode::Char(c), _, true) if c.is_ascii_digit() => {
@@ -610,6 +628,9 @@ impl App {
             KeyCode::Down => self.scroll_chat(-1),
             KeyCode::Home => self.scroll_chat(i64::MAX / 2),
             KeyCode::End => self.scroll_chat(i64::MIN / 2),
+            KeyCode::Delete => {
+                self.confirm_remove = self.selected_contact.filter(|k| self.contacts.by_prefix(k).is_some());
+            }
             KeyCode::Char(_) => self.type_into_input(k),
             _ => {}
         }
@@ -628,6 +649,9 @@ impl App {
                     self.switch(win);
                     self.focus = Focus::Input;
                 }
+            }
+            KeyCode::Delete => {
+                self.confirm_remove = self.selected_contact.filter(|k| self.contacts.by_prefix(k).is_some());
             }
             KeyCode::Char(_) => self.type_into_input(k),
             _ => {}
@@ -1152,6 +1176,17 @@ impl App {
                     }
                 }
             }
+            RadioReply::ContactRemoved { key, name } => {
+                if self.selected_contact == Some(key) {
+                    // keep the cursor on the row the removed contact occupied
+                    let sorted = self.contacts.sorted();
+                    let pos = sorted.iter().position(|c| c.public_key == key).unwrap_or(0);
+                    let next = sorted.iter().filter(|c| c.public_key != key).nth(pos.min(sorted.len().saturating_sub(2)));
+                    self.selected_contact = next.map(|c| c.public_key);
+                }
+                self.contacts.remove(&key);
+                self.notice(self.active, &format!("{name} removed from contacts"));
+            }
             RadioReply::Joined { idx, name, secret } => {
                 self.slots.set(idx, name.clone());
                 self.slots.set_secret(idx, &secret);
@@ -1554,6 +1589,35 @@ mod tests {
         assert!(v["windows"].as_array().unwrap().iter().any(|w| w["name"] == "#team"));
         let q = v["windows"].as_array().unwrap().iter().find(|w| w["kind"] == "query").unwrap();
         assert_eq!((&q["name"], &q["lines"][0]["text"]), (&"Bob".into(), &"secret".into()));
+    }
+
+    #[test]
+    fn delete_in_sidebar_asks_before_removing_contact() {
+        let mut app = mention_app();
+        app.connected = true;
+        let (tx, mut rx) = mpsc::channel(8);
+        app.radio = tx;
+        let press = |app: &mut App, code: KeyCode| app.handle(AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Contacts);
+        let bob = app.contacts.resolve("Bob");
+        let Resolve::One(bob) = bob else { panic!() };
+        let bob = bob.public_key;
+        app.selected_contact = Some(bob);
+        press(&mut app, KeyCode::Delete);
+        assert_eq!(app.confirm_remove, Some(bob));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.confirm_remove, None);
+        assert!(rx.try_recv().is_err(), "cancelled: nothing sent");
+        press(&mut app, KeyCode::Delete);
+        press(&mut app, KeyCode::Char('y'));
+        let Ok(RadioCmd::RemoveContact { contact }) = rx.try_recv() else { panic!("no remove sent") };
+        assert_eq!(contact.adv_name, "Bob");
+        assert!(app.contacts.by_prefix(&bob).is_some(), "kept until the radio confirms");
+        app.handle(AppEvent::Reply(RadioReply::ContactRemoved { key: bob, name: "Bob".into() }));
+        assert!(app.contacts.by_prefix(&bob).is_none());
+        assert!(app.selected_contact.is_some_and(|k| k != bob));
     }
 
     #[test]

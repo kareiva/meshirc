@@ -80,6 +80,11 @@ These come from the MeshCore companion protocol and from reading `meshcore-rs` s
   firmware layout, so `radio::trace` sends `CMD_SEND_TRACE_PATH` (36) raw and reads the result
   from the trace packet's `LogData` (header path = one SNR byte per hop, payload starts with our tag).
   `Contact.path_len` packs hop count (low 6 bits) and hash size − 1 (top 2 bits); `0xff` = flood.
+- **meshcore-rs `send()` ignores error frames.** Calls that wait for `Ok` (e.g. `remove_contact`)
+  turn a firmware `Err` reply into a 5 s timeout. `radio::remove_contact` races the call against
+  `EventType::Error` to get the code (`2` = not found). Contacts that arrive via a `NEW_ADVERT`
+  push (`NewContact`) may not be stored on the radio (manual-add mode), so "not found" on remove
+  just drops them from the sidebar.
 - **Text limit** is 160 bytes per message. Reject or split longer input.
 - **`send_msg` needs a `Contact`** (or 6-byte pubkey prefix) — never a name.
 
@@ -263,7 +268,7 @@ candidates, `ui::draw_mentions` shows a popup above the input aligned with the `
 a unique match, otherwise `Tab`/`Down`/`Up` move the selection and `Enter` inserts `@[Name] `.
 The mention is dropped on `Esc`, on cursor movement, when nothing matches, or when backspacing over the `@`.
 
-Focus model (`App::focus`): with an empty input, `Tab` cycles Input → Chat → Contacts; `Shift+Tab` reverses; `Esc` or typing a printable char returns to Input. Chat focus: `Up`/`Down`/`Home`/`End` scroll. Contacts focus: `Up`/`Down` move `selected_contact` (tracked by pubkey so re-sorting doesn't lose it), `Enter` opens/activates the query window. The prompt shows `[win|scroll]` / `[win|contacts]` and the sidebar title turns yellow when focused.
+Focus model (`App::focus`): with an empty input, `Tab` cycles Input → Chat → Contacts; `Shift+Tab` reverses; `Esc` or typing a printable char returns to Input. Chat focus: `Up`/`Down`/`Home`/`End` scroll. Contacts focus: `Up`/`Down` move `selected_contact` (tracked by pubkey so re-sorting doesn't lose it), `Enter` opens/activates the query window, `Delete` opens a "Remove <name> from the contact list?" dialog (`App::confirm_remove`, drawn by `ui::draw_confirm_remove`): `y` sends `RadioCmd::RemoveContact` (`remove_contact` on the radio) and the contact leaves the sidebar on `RadioReply::ContactRemoved`; any other key cancels. A removed node comes back as a new contact when it adverts again (if the radio auto-adds). The prompt shows `[win|scroll]` / `[win|contacts]` and the sidebar title turns yellow when focused.
 
 ## Logging
 

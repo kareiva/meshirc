@@ -25,6 +25,8 @@ pub enum RadioCmd {
     /// `path` / `flags` as built by `contacts::trace_path`.
     Trace { name: String, path: Vec<u8>, flags: u8, window: usize },
     RefreshContacts,
+    /// Delete the contact from the radio's contact table.
+    RemoveContact { contact: Contact },
     Advert { flood: bool },
     SetName(String),
     Battery,
@@ -38,6 +40,7 @@ pub enum RadioReply {
     Disconnected(String),
     SlotInUse { idx: u8, name: String, secret: [u8; 16] },
     Contacts(Vec<Contact>),
+    ContactRemoved { key: [u8; 32], name: String },
     Joined { idx: u8, name: String, secret: [u8; 16] },
     Parted { idx: u8, name: String },
     DmSent { window: usize, line: usize, tag: [u8; 4], timeout_ms: u32 },
