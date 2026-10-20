@@ -1,5 +1,7 @@
 # MeshIRC
 
+![meshirc web interface](meshirc.png "meshirc")
+
 An irssi-style terminal client for [MeshCore](https://meshcore.co.uk) companion radios
 connected over USB serial.
 
