@@ -1067,17 +1067,21 @@ impl App {
 
     // ----- web view -----
 
-    /// State for the read-only web view (`web.rs`): channel windows, plus private windows when
-    /// `http_private_windows` is set. Error lines are local to the TUI and left out.
+    /// State for the read-only web view (`web.rs`): channels whose key is derived from the name,
+    /// plus private windows and custom-key channels when `http_private_windows` is set. Error
+    /// lines are local to the TUI and left out.
     pub fn web_snapshot(&self) -> String {
         use serde_json::{json, Value};
+        let private = self.cfg.http_private_windows;
         let windows: Vec<Value> = self
             .windows
             .iter()
             .filter_map(|w| {
                 let (id, kind) = match &w.kind {
-                    WindowKind::Channel { name, .. } => (format!("c:{}", name.to_lowercase()), "channel"),
-                    WindowKind::Query { prefix, .. } if self.cfg.http_private_windows => (format!("q:{}", hex::encode(prefix)), "query"),
+                    WindowKind::Channel { idx, name } if private || !self.slots.has_custom_key(*idx) => {
+                        (format!("c:{}", name.to_lowercase()), "channel")
+                    }
+                    WindowKind::Query { prefix, .. } if private => (format!("q:{}", hex::encode(prefix)), "query"),
                     _ => return None,
                 };
                 let lines: Vec<Value> = w
@@ -1124,8 +1128,9 @@ impl App {
                 self.connected = false;
                 self.notice(0, &format!("disconnected: {e} — reconnecting"));
             }
-            RadioReply::SlotInUse { idx, name } => {
+            RadioReply::SlotInUse { idx, name, secret } => {
                 self.slots.set(idx, name.clone());
+                self.slots.set_secret(idx, &secret);
                 if self.find_channel(idx).is_none() {
                     self.channel_window(idx, name.clone());
                 }
@@ -1147,8 +1152,9 @@ impl App {
                     }
                 }
             }
-            RadioReply::Joined { idx, name } => {
+            RadioReply::Joined { idx, name, secret } => {
                 self.slots.set(idx, name.clone());
+                self.slots.set_secret(idx, &secret);
                 let win = self.find_channel(idx).unwrap_or_else(|| self.channel_window(idx, name.clone()));
                 self.switch(win);
                 self.notice(win, &format!("joined {name} (slot {idx})"));
@@ -1527,9 +1533,10 @@ mod tests {
     #[test]
     fn web_snapshot_hides_private_unless_enabled() {
         let mut app = mention_app();
-        app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: 0, name: "Public".into() }));
+        app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: 0, name: "Public".into(), secret: channels::PUBLIC_KEY }));
         let ch = app.find_channel(0).unwrap();
         app.message(ch, "Bob", "hi <b>", false, None);
+        app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: 5, name: "#team".into(), secret: [7; 16] }));
         let bob = contact("Bob", 3);
         let q = app.query_window(Some(&bob), &bob.prefix());
         app.message(q, "Bob", "secret", false, None);
@@ -1538,11 +1545,13 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&app.web_snapshot()).unwrap();
         let wins = v["windows"].as_array().unwrap();
         assert!(wins.iter().all(|w| w["kind"] == "channel"));
+        assert!(wins.iter().all(|w| w["name"] != "#team"), "custom-key channel hidden");
         let public = wins.iter().find(|w| w["name"] == "Public").unwrap();
         assert!(public["lines"].as_array().unwrap().iter().any(|l| l["nick"] == "Bob" && l["text"] == "hi <b>"));
         assert!(!app.web_snapshot().contains("local only"));
         app.cfg.http_private_windows = true;
         let v: serde_json::Value = serde_json::from_str(&app.web_snapshot()).unwrap();
+        assert!(v["windows"].as_array().unwrap().iter().any(|w| w["name"] == "#team"));
         let q = v["windows"].as_array().unwrap().iter().find(|w| w["kind"] == "query").unwrap();
         assert_eq!((&q["name"], &q["lines"][0]["text"]), (&"Bob".into(), &"secret".into()));
     }
@@ -1770,7 +1779,7 @@ mod tests {
         app.connected = true;
         app.slots = SlotTable::new(8);
         for (i, n) in ["Public", "#a", "#b", "#c", "#d"].iter().enumerate() {
-            app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: i as u8, name: n.to_string() }));
+            app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: i as u8, name: n.to_string(), secret: channels::secret_for(n) }));
         }
         app.open_window(WindowKind::Query { prefix: [1; 6], name: "Q".into() });
         app.switch(5); // #d
@@ -1792,7 +1801,7 @@ mod tests {
         };
         assert_eq!(idx, 3, "freed radio slot is reused");
 
-        app.handle(AppEvent::Reply(RadioReply::Joined { idx, name: "#e".into() }));
+        app.handle(AppEvent::Reply(RadioReply::Joined { idx, name: "#e".into(), secret: channels::secret_for("#e") }));
         assert_eq!(names(&app), ["status", "Public", "#a", "#b", "#e", "#d", "Q"]);
         assert_eq!(app.active, 4);
         assert_eq!(app.pending_sends[0].window, 5, "pending mark follows #d up");

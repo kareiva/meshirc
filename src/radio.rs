@@ -48,7 +48,7 @@ async fn run_connection(
     for idx in 0..max_channels {
         match cmds.lock().await.get_channel(idx).await {
             Ok(ch) if !ch.name.is_empty() => {
-                reply(tx, RadioReply::SlotInUse { idx, name: ch.name }).await;
+                reply(tx, RadioReply::SlotInUse { idx, name: ch.name, secret: ch.secret }).await;
             }
             Ok(_) => {}
             Err(e) => warn!("get_channel {idx}: {e}"),
@@ -108,7 +108,7 @@ async fn handle_cmd(cmd: RadioCmd, cmds: &Cmds, dispatcher: &Arc<EventDispatcher
         }
         RadioCmd::JoinChannel { idx, name, secret } => {
             match cmds.lock().await.set_channel(idx, &name, &secret).await {
-                Ok(()) => reply(tx, RadioReply::Joined { idx, name }).await,
+                Ok(()) => reply(tx, RadioReply::Joined { idx, name, secret }).await,
                 Err(e) => reply(tx, RadioReply::Error(format!("join {name}: {e}"))).await,
             }
         }

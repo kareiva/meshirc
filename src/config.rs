@@ -23,7 +23,7 @@ pub struct Cli {
     /// Serve a read-only web view of the channels on port 8667 (default false)
     #[arg(long, value_name = "BOOL")]
     pub http_server: Option<bool>,
-    /// Also show private conversations in the web view (default false)
+    /// Also show private conversations and channels with a custom key in the web view (default false)
     #[arg(long, value_name = "BOOL")]
     pub http_private_windows: Option<bool>,
     /// Address for the web view: `host:port`, or a bare address/hostname for port 8667

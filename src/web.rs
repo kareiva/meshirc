@@ -1,5 +1,6 @@
-//! Read-only web view (`--http-server true`): thelounge-style tabs of the channel windows
-//! (and private windows with `--http-private-windows true`). A tiny HTTP/1.1 server on tokio;
+//! Read-only web view (`--http-server true`): thelounge-style tabs of the channel windows whose
+//! key is derived from the name (custom-key channels and private windows only with
+//! `--http-private-windows true`). A tiny HTTP/1.1 server on tokio;
 //! the page polls `/api/state`, which the main loop answers via `AppEvent::WebSnapshot`, so
 //! `App` stays the only owner of the state.
 
@@ -25,7 +26,7 @@ pub fn spawn(tx: mpsc::Sender<AppEvent>, bind: String, private: bool) {
         };
         let addr = listener.local_addr().map(|a| a.to_string()).unwrap_or(bind);
         info!("http: serving on {addr}");
-        let what = if private { "channels and private windows" } else { "channels" };
+        let what = if private { "all channels and private windows" } else { "public channels" };
         let text = format!("web view ({what}, read-only) on http://{addr}/");
         let _ = tx.send(AppEvent::Reply(RadioReply::Notice { window: Some(0), text })).await;
         loop {
