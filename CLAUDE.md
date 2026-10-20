@@ -15,6 +15,8 @@ Written in Rust. Talks to the radio through the
   no per-channel nick list
 - Private messages (`/msg`, `/query`)
 - `/whois` — shows cached contact info; `/status` requests live status from the mesh
+- Optional read-only web view (`--http-server true`, port 8667): thelounge-style tabs of the
+  channel windows, auto-refreshing; `--http-private-windows true` adds private windows
 
 ## Design decisions (settled)
 
@@ -25,7 +27,8 @@ Written in Rust. Talks to the radio through the
 | Layout | **irssi windows + Discord sidebar.** Numbered windows (0 = status, then channel windows kept in radio-slot order — a rejoined slot gets its old window number back — then queries in open order) switched with `Alt+0..9`, `Ctrl+N`/`Ctrl+P`, `/win N`. Persistent right pane lists every contact. Top bar: node name, serial port, radio settings, GPS/advertised location, battery. Bottom bar: clock, `N:name` for every window (names shortened with `…` when too narrow; unread windows in red, bold red for new messages), `[disconnected]`. |
 | `/whois` / `/status` | `/whois` prints cached contact info only (pubkey shown as first 16 bytes). `/status` sends a binary status request and prints the response (or a timeout notice) when it arrives. Only repeaters/rooms answer. |
 | Contact addressing | Names may contain spaces, so `/msg` / `/query` / `/whois` accept: exact name, unique case-insensitive name prefix, or public-key hex prefix (≥ 4 hex chars). Ambiguity → error listing the candidates. Tab-completion in the input line resolves names. |
-| Config | CLI flags via `clap`, with optional `~/.config/meshirc/config.toml` for the same values (`port`, `baud`, `log_dir`, `history_lines`, `save_private`, `auto_join = ["#foo"]`). CLI overrides file. |
+| Config | CLI flags via `clap`, with optional `~/.config/meshirc/config.toml` for the same values (`port`, `baud`, `log_dir`, `history_lines`, `save_private`, `http_server`, `http_private_windows`, `http_bind`, `auto_join = ["#foo"]`). CLI overrides file. |
+| Web view | `web.rs`: hand-rolled HTTP/1.1 on tokio (no web framework), GET only. Listens on `--http-bind` (default `0.0.0.0:8667`; a bare address/hostname gets port 8667, see `config::bind_addr`); bind errors show in the status window. `/` serves `src/web/index.html` (embedded, no external assets); `/api/state` is JSON from `App::web_snapshot`, requested over `AppEvent::WebSnapshot(oneshot)` so `App` stays the single owner of state. ETag/304; the page polls every 2 s. Error lines (TUI-local) are left out; private windows only with `http_private_windows`. |
 
 ## MeshCore facts that shape the code
 
@@ -130,6 +133,7 @@ src/
     statusbar.rs  "[1:status] [2:#lt] …  MyNode  bat 87%" (unread windows red)
   logs.rs         per-window append-only log writer + tail reader
   event.rs        AppEvent enum, terminal input task
+  web.rs          optional read-only HTTP view; page in web/index.html
 ```
 
 ### Concurrency model

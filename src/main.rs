@@ -7,6 +7,7 @@ mod event;
 mod logs;
 mod radio;
 mod ui;
+mod web;
 
 use anyhow::Result;
 use app::App;
@@ -39,6 +40,9 @@ async fn main() -> Result<()> {
     let mut app = App::new(cfg.clone(), radio_tx.clone())?;
 
     radio::spawn(cfg.port.clone(), cfg.baud, tx.clone(), radio_rx);
+    if cfg.http_server {
+        web::spawn(tx.clone(), cfg.http_bind.clone(), cfg.http_private_windows);
+    }
     event::spawn_terminal_task(tx.clone());
     event::spawn_tick_task(tx);
 

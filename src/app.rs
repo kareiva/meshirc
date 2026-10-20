@@ -520,6 +520,9 @@ impl App {
             AppEvent::Tick => self.on_tick(),
             AppEvent::Reply(r) => self.on_reply(r),
             AppEvent::Radio(ev) => self.on_radio(ev.payload),
+            AppEvent::WebSnapshot(reply) => {
+                let _ = reply.send(self.web_snapshot());
+            }
         }
     }
 
@@ -1062,6 +1065,49 @@ impl App {
         self.notice(win, &format!("  {from} → me  snr {final_snr:+.2} dB"));
     }
 
+    // ----- web view -----
+
+    /// State for the read-only web view (`web.rs`): channel windows, plus private windows when
+    /// `http_private_windows` is set. Error lines are local to the TUI and left out.
+    pub fn web_snapshot(&self) -> String {
+        use serde_json::{json, Value};
+        let windows: Vec<Value> = self
+            .windows
+            .iter()
+            .filter_map(|w| {
+                let (id, kind) = match &w.kind {
+                    WindowKind::Channel { name, .. } => (format!("c:{}", name.to_lowercase()), "channel"),
+                    WindowKind::Query { prefix, .. } if self.cfg.http_private_windows => (format!("q:{}", hex::encode(prefix)), "query"),
+                    _ => return None,
+                };
+                let lines: Vec<Value> = w
+                    .lines
+                    .iter()
+                    .filter_map(|l| match &l.kind {
+                        LineKind::Msg { nick, own, mark } => {
+                            let mark = mark.map(|m| format!("{m:?}").to_lowercase());
+                            Some(json!({ "t": l.time, "k": "msg", "nick": nick, "own": own, "mark": mark, "text": l.text }))
+                        }
+                        // log lines: "<nick> text" or "-!- notice"
+                        LineKind::History => Some(match l.text.strip_prefix('<').and_then(|r| r.split_once("> ")) {
+                            Some((nick, text)) => json!({ "t": l.time, "k": "msg", "nick": nick, "own": false, "old": true, "text": text }),
+                            None => json!({ "t": l.time, "k": "notice", "old": true, "text": l.text.trim_start_matches("-!- ") }),
+                        }),
+                        LineKind::Notice => Some(json!({ "t": l.time, "k": "notice", "text": l.text })),
+                        LineKind::Error => None,
+                    })
+                    .collect();
+                Some(json!({ "id": id, "kind": kind, "name": w.name(), "lines": lines }))
+            })
+            .collect();
+        json!({
+            "me": self.me.as_ref().map(|m| m.name.clone()),
+            "connected": self.connected,
+            "windows": windows,
+        })
+        .to_string()
+    }
+
     // ----- radio -----
 
     fn on_reply(&mut self, r: RadioReply) {
@@ -1318,6 +1364,9 @@ mod tests {
             data_dir: dir,
             history_lines,
             save_private: true,
+            http_server: false,
+            http_private_windows: false,
+            http_bind: String::new(),
             auto_join: vec![],
         };
         let (tx, rx) = mpsc::channel(8);
@@ -1473,6 +1522,29 @@ mod tests {
         assert_eq!(app.windows[win].lines.last().unwrap().text, "requesting status from Bob...");
         app.execute(Command::Trace(None));
         assert!(app.windows[win].lines.last().unwrap().text.contains("no known route to Bob"));
+    }
+
+    #[test]
+    fn web_snapshot_hides_private_unless_enabled() {
+        let mut app = mention_app();
+        app.handle(AppEvent::Reply(RadioReply::SlotInUse { idx: 0, name: "Public".into() }));
+        let ch = app.find_channel(0).unwrap();
+        app.message(ch, "Bob", "hi <b>", false, None);
+        let bob = contact("Bob", 3);
+        let q = app.query_window(Some(&bob), &bob.prefix());
+        app.message(q, "Bob", "secret", false, None);
+        app.switch(ch);
+        app.error("local only");
+        let v: serde_json::Value = serde_json::from_str(&app.web_snapshot()).unwrap();
+        let wins = v["windows"].as_array().unwrap();
+        assert!(wins.iter().all(|w| w["kind"] == "channel"));
+        let public = wins.iter().find(|w| w["name"] == "Public").unwrap();
+        assert!(public["lines"].as_array().unwrap().iter().any(|l| l["nick"] == "Bob" && l["text"] == "hi <b>"));
+        assert!(!app.web_snapshot().contains("local only"));
+        app.cfg.http_private_windows = true;
+        let v: serde_json::Value = serde_json::from_str(&app.web_snapshot()).unwrap();
+        let q = v["windows"].as_array().unwrap().iter().find(|w| w["kind"] == "query").unwrap();
+        assert_eq!((&q["name"], &q["lines"][0]["text"]), (&"Bob".into(), &"secret".into()));
     }
 
     #[test]

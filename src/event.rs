@@ -1,7 +1,7 @@
 use crossterm::event::{Event, EventStream, KeyEvent};
 use futures::StreamExt;
 use meshcore_rs::events::{Contact, DeviceInfoData, MeshCoreEvent, SelfInfo, StatusData};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]
 pub enum AppEvent {
@@ -11,6 +11,8 @@ pub enum AppEvent {
     Radio(MeshCoreEvent),
     Reply(RadioReply),
     Tick,
+    /// Web view asks for the current state as JSON (`App::web_snapshot`).
+    WebSnapshot(oneshot::Sender<String>),
 }
 
 #[derive(Debug)]
