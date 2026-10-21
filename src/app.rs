@@ -8,7 +8,7 @@ use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use meshcore_rs::events::{Contact, DeviceInfoData, EventPayload, SelfInfo, StatusData};
 use meshcore_rs::PayloadType;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tui_input::backend::crossterm::EventHandler;
@@ -52,6 +52,8 @@ struct HeardPacket {
 const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 const HEARD_GRACE: Duration = Duration::from_millis(1500);
 const FW_MAX_TEXT_LEN: usize = 160;
+/// `ContactMessage::txt_type` of repeater CLI replies (and of the commands we send them).
+const TXT_TYPE_CLI_DATA: u8 = 1;
 
 fn pad16(n: usize) -> usize {
     n.div_ceil(16) * 16
@@ -144,6 +146,12 @@ pub struct App {
     pending_sends: Vec<PendingSend>,
     heard: Vec<HeardPacket>,
     pending_joins: Vec<String>,
+    /// Repeater commands awaiting their CLI reply: (repeater prefix, window, line, give up at).
+    pending_cmds: Vec<([u8; 6], usize, usize, Instant)>,
+    /// Repeaters/rooms logged into this session (`/login`).
+    logged_in: HashSet<[u8; 32]>,
+    /// Repeaters already told "not logged in" (the hint shows once per node).
+    login_hinted: HashSet<[u8; 32]>,
     /// Private windows from earlier sessions have been reopened (done once contacts are known).
     queries_restored: bool,
     ticks: u64,
@@ -193,6 +201,9 @@ impl App {
             pending_sends: Vec::new(),
             heard: Vec::new(),
             pending_joins: cfg.auto_join.iter().map(|n| channels::normalize_name(n)).collect(),
+            pending_cmds: vec![],
+            logged_in: HashSet::new(),
+            login_hinted: HashSet::new(),
             queries_restored: false,
             ticks: 0,
             should_quit: false,
@@ -307,6 +318,7 @@ impl App {
         self.windows.remove(i);
         self.pending_sends.retain(|p| p.window != i);
         self.pending_acks.retain(|_, (win, _)| *win != i);
+        self.pending_cmds.retain(|(_, win, ..)| *win != i);
         self.shift_windows(i + 1, -1);
         if self.active >= self.windows.len() || self.active == i {
             self.active = i.saturating_sub(1).min(self.windows.len() - 1);
@@ -327,6 +339,9 @@ impl App {
             fix(&mut p.window);
         }
         for (win, _) in self.pending_acks.values_mut() {
+            fix(win);
+        }
+        for (_, win, ..) in &mut self.pending_cmds {
             fix(win);
         }
         if delta > 0 {
@@ -384,6 +399,7 @@ impl App {
         w.scroll = 0;
         self.pending_sends.retain(|p| p.window != i);
         self.pending_acks.retain(|_, (win, _)| *win != i);
+        self.pending_cmds.retain(|(_, win, ..)| *win != i);
         let name = w.log_name();
         self.logs.remove(&name)
     }
@@ -609,7 +625,7 @@ impl App {
             KeyCode::Enter => {
                 let line = self.input.value_and_reset();
                 self.history_pos = None;
-                if !line.trim().is_empty() {
+                if !line.trim().is_empty() && !is_login(&line) {
                     self.history.push(line.clone());
                 }
                 if let Some(cmd) = commands::parse(&line) {
@@ -909,6 +925,7 @@ impl App {
                     }
                 }
             }
+            Command::Login(arg) => self.login(&arg),
             Command::Contacts => {
                 self.send_radio(RadioCmd::RefreshContacts);
                 self.notice(self.active, "refreshing contacts...");
@@ -1028,9 +1045,56 @@ impl App {
             return self.error("radio not connected");
         }
         let me = self.me_name();
+        if contact.contact_type == contacts::TYPE_REPEATER {
+            // every DM to a repeater is a remote-control (CLI) command
+            let key = contact.public_key;
+            if !self.logged_in.contains(&key) && self.login_hinted.insert(key) {
+                self.notice(win, &format!("not logged in to {} this session; it only takes commands from an admin (/login <password>)", contact.adv_name));
+            }
+            let line = self.message(win, &me, text, true, Some(Mark::Pending));
+            if !self.send_radio(RadioCmd::SendCommand { contact, text: text.to_string(), window: win, line }) {
+                self.set_mark(win, line, Mark::Failed);
+            }
+            return;
+        }
         let line = self.message(win, &me, text, true, Some(Mark::Pending));
         if !self.send_radio(RadioCmd::SendDm { contact, text: text.to_string(), window: win, line }) {
             self.set_mark(win, line, Mark::Failed);
+        }
+    }
+
+    /// `/login <password>` in a repeater/room window, else `/login <who> <password>` (the
+    /// password is the last word; names may contain spaces).
+    fn login(&mut self, arg: &str) {
+        let window = self.active;
+        let in_relay_window = match &self.windows[window].kind {
+            WindowKind::Query { prefix, .. } => self.contacts.by_prefix(prefix).is_some_and(|c| c.contact_type != contacts::TYPE_CHAT),
+            _ => false,
+        };
+        // `/login <who> <pw>` works everywhere, like meshcore-cli; in a repeater/room window a
+        // bare `/login <pw>` targets that node. Repeaters don't answer a wrong password at all, so
+        // sending "<who> <pw>" as the password would just time out.
+        let named = arg.trim().rsplit_once(' ').and_then(|(who, pw)| match self.contacts.resolve(who.trim()) {
+            Resolve::One(c) if c.contact_type != contacts::TYPE_CHAT => Some((c.clone(), pw.to_string())),
+            _ => None,
+        });
+        let (contact, password) = if let Some((c, pw)) = named.filter(|_| in_relay_window) {
+            (Some(c), pw)
+        } else if in_relay_window {
+            (self.target_or_error(None, "login"), arg.trim().to_string())
+        } else {
+            match arg.trim().rsplit_once(' ') {
+                Some((who, pw)) => (self.resolve_or_error(who.trim()), pw.to_string()),
+                None => return self.error("usage: /login <who> <password> (just /login <password> in a repeater's window)"),
+            }
+        };
+        let Some(c) = contact else { return };
+        if c.contact_type == contacts::TYPE_CHAT {
+            return self.error(&format!("{} is a chat node; /login is for repeaters and rooms", c.adv_name));
+        }
+        let name = c.adv_name.clone();
+        if self.send_radio(RadioCmd::Login { contact: c, password, window }) {
+            self.notice(window, &format!("logging in to {name}..."));
         }
     }
 
@@ -1223,6 +1287,28 @@ impl App {
                     deadline: Instant::now() + REPEAT_WINDOW,
                 });
             }
+            RadioReply::CommandSent { window, line, prefix } => {
+                let text = self.line_text(window, line);
+                self.pending_cmds.push((prefix, window, line, Instant::now() + 2 * REPEAT_WINDOW));
+                self.pending_sends.push(PendingSend {
+                    window,
+                    line,
+                    kind: PktKind::Direct,
+                    payload_len: direct_payload_len(&text),
+                    deadline: Instant::now() + REPEAT_WINDOW,
+                });
+            }
+            RadioReply::Login { window, key, name, ok } => match ok {
+                Some(true) => {
+                    self.logged_in.insert(key);
+                    self.notice(window, &format!("logged in to {name}"));
+                }
+                Some(false) => {
+                    self.logged_in.remove(&key);
+                    self.error(&format!("login to {name} rejected (wrong password?)"));
+                }
+                None => self.notice(window, &format!("{name}: no login reply (timeout)")),
+            },
             RadioReply::SendFailed { window, line, error } => {
                 self.set_mark(window, line, Mark::Failed);
                 self.error(&error);
@@ -1260,7 +1346,19 @@ impl App {
                 let c = self.contacts.by_prefix(&m.sender_prefix).cloned();
                 let win = self.query_window(c.as_ref(), &m.sender_prefix);
                 let nick = self.windows[win].name();
-                self.message(win, &nick, &m.text, false, None);
+                if m.txt_type == TXT_TYPE_CLI_DATA {
+                    // repeater CLI reply: settles the oldest command sent to that node
+                    if let Some(i) = self.pending_cmds.iter().position(|(p, ..)| *p == m.sender_prefix) {
+                        let (_, w, l, _) = self.pending_cmds.remove(i);
+                        self.pending_sends.retain(|p| (p.window, p.line) != (w, l));
+                        self.set_mark(w, l, Mark::Acked);
+                    }
+                    for part in m.text.lines().filter(|l| !l.trim().is_empty()) {
+                        self.message(win, &nick, part, false, None);
+                    }
+                } else {
+                    self.message(win, &nick, &m.text, false, None);
+                }
             }
             EventPayload::ChannelMessage(m) => {
                 self.forget_heard(PktKind::Channel);
@@ -1359,6 +1457,7 @@ impl App {
         let now = Instant::now();
         let expired: Vec<(usize, usize)> = self.pending_sends.iter().filter(|p| p.deadline <= now).map(|p| (p.window, p.line)).collect();
         self.pending_sends.retain(|p| p.deadline > now);
+        self.pending_cmds.retain(|(.., until)| *until > now);
         for (w, l) in expired {
             self.set_mark(w, l, Mark::Failed);
         }
@@ -1376,6 +1475,12 @@ impl App {
     }
 }
 
+/// `/login …` lines carry a password: kept out of the input history.
+fn is_login(line: &str) -> bool {
+    let l = line.trim_start().to_lowercase();
+    l == "/login" || l.starts_with("/login ")
+}
+
 fn common_prefix(items: &[String]) -> String {
     let first = &items[0];
     let mut len = first.len();
@@ -1388,7 +1493,7 @@ fn common_prefix(items: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meshcore_rs::events::{ChannelMessage, LogData, MeshCoreEvent, MeshPacketHeader};
+    use meshcore_rs::events::{ChannelMessage, ContactMessage, LogData, MeshCoreEvent, MeshPacketHeader};
     use meshcore_rs::{EventType, RouteType};
 
     fn app() -> App {
@@ -1618,6 +1723,78 @@ mod tests {
         app.handle(AppEvent::Reply(RadioReply::ContactRemoved { key: bob, name: "Bob".into() }));
         assert!(app.contacts.by_prefix(&bob).is_none());
         assert!(app.selected_contact.is_some_and(|k| k != bob));
+    }
+
+    #[test]
+    fn repeater_dms_are_commands_and_reply_settles_them() {
+        let mut app = mention_app();
+        app.connected = true;
+        let (tx, mut rx) = mpsc::channel(8);
+        app.radio = tx;
+        let mut rpt = contact("Hill", 0xa1);
+        rpt.contact_type = contacts::TYPE_REPEATER;
+        app.contacts.upsert(rpt.clone());
+        let win = app.query_window(Some(&rpt), &rpt.prefix());
+        app.switch(win);
+        app.execute(Command::Say("ver".into()));
+        assert!(app.windows[win].lines.iter().any(|l| l.text.contains("not logged in to Hill")));
+        let Ok(RadioCmd::SendCommand { text, line, .. }) = rx.try_recv() else { panic!("expected a CLI command") };
+        assert_eq!(text, "ver");
+        app.handle(AppEvent::Reply(RadioReply::CommandSent { window: win, line, prefix: rpt.prefix() }));
+        let reply = ContactMessage {
+            sender_prefix: rpt.prefix(),
+            path_len: 0,
+            txt_type: TXT_TYPE_CLI_DATA,
+            sender_timestamp: 0,
+            text: "v1.17.1\nbuilt today".into(),
+            snr: None,
+            signature: None,
+        };
+        app.handle(AppEvent::Radio(MeshCoreEvent::new(EventType::ContactMsgRecv, EventPayload::ContactMessage(reply))));
+        assert_eq!(app.mark_of(win, line), Some(Mark::Acked));
+        let texts: Vec<&str> = app.windows[win].lines.iter().rev().take(2).map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["built today", "v1.17.1"]);
+        assert!(app.pending_cmds.is_empty() && app.pending_sends.is_empty());
+
+        // chat nodes still get plain DMs
+        let bob = app.contacts.by_prefix(&[3]).cloned().unwrap();
+        let bw = app.query_window(Some(&bob), &bob.prefix());
+        app.switch(bw);
+        app.execute(Command::Say("hi".into()));
+        assert!(matches!(rx.try_recv(), Ok(RadioCmd::SendDm { .. })));
+    }
+
+    #[test]
+    fn login_targets_and_keeps_password_out_of_history() {
+        let mut app = mention_app();
+        app.connected = true;
+        let (tx, mut rx) = mpsc::channel(8);
+        app.radio = tx;
+        let mut rpt = contact("Hill Top", 0xa1);
+        rpt.contact_type = contacts::TYPE_REPEATER;
+        app.contacts.upsert(rpt.clone());
+        // elsewhere: name (with spaces) + password as the last word
+        keys(&mut app, "/login Hill Top s3cret");
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let Ok(RadioCmd::Login { contact, password, .. }) = rx.try_recv() else { panic!("no login sent") };
+        assert_eq!((contact.adv_name.as_str(), password.as_str()), ("Hill Top", "s3cret"));
+        assert!(app.history.iter().all(|h| !h.contains("s3cret")));
+        // in the repeater's window the whole argument is the password
+        let win = app.query_window(Some(&rpt), &rpt.prefix());
+        app.switch(win);
+        app.execute(Command::Login("pass word".into()));
+        let Ok(RadioCmd::Login { password, .. }) = rx.try_recv() else { panic!("no login sent") };
+        assert_eq!(password, "pass word");
+        // ...unless it starts with a repeater's name, as in meshcore-cli
+        app.execute(Command::Login("Hill Top s3cret ".into()));
+        let Ok(RadioCmd::Login { contact, password, .. }) = rx.try_recv() else { panic!("no login sent") };
+        assert_eq!((contact.adv_name.as_str(), password.as_str()), ("Hill Top", "s3cret"));
+        app.handle(AppEvent::Reply(RadioReply::Login { window: win, key: rpt.public_key, name: "Hill Top".into(), ok: Some(true) }));
+        assert!(app.logged_in.contains(&rpt.public_key));
+        // chat nodes are refused
+        app.switch(0);
+        app.execute(Command::Login("Bob pw".into()));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

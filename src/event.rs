@@ -18,6 +18,10 @@ pub enum AppEvent {
 #[derive(Debug)]
 pub enum RadioCmd {
     SendDm { contact: Contact, text: String, window: usize, line: usize },
+    /// Repeater remote-control command: a DM with `txt_type` = CLI data (no ACK; the repeater
+    /// answers with a CLI-data DM).
+    SendCommand { contact: Contact, text: String, window: usize, line: usize },
+    Login { contact: Contact, password: String, window: usize },
     SendChannel { idx: u8, text: String, window: usize, line: usize },
     JoinChannel { idx: u8, name: String, secret: [u8; 16] },
     PartChannel { idx: u8, name: String },
@@ -45,6 +49,9 @@ pub enum RadioReply {
     Parted { idx: u8, name: String },
     DmSent { window: usize, line: usize, tag: [u8; 4], timeout_ms: u32 },
     ChannelSent { window: usize, line: usize },
+    CommandSent { window: usize, line: usize, prefix: [u8; 6] },
+    /// `ok`: `Some(true)` logged in, `Some(false)` rejected, `None` no reply.
+    Login { window: usize, key: [u8; 32], name: String, ok: Option<bool> },
     SendFailed { window: usize, line: usize, error: String },
     Status { window: usize, name: String, status: StatusData },
     /// SNR (dB) at which each hop of `path` heard the trace, then at which we heard the last hop.
