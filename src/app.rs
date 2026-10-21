@@ -1110,7 +1110,7 @@ impl App {
             format!("  pubkey    {}", hex::encode(&c.public_key[..16])),
             format!("  last seen {} ago", contacts::age(now, last)),
             format!("  location  {:.5}, {:.5}", c.latitude(), c.longitude()),
-            format!("  path      {}", if c.path_len < 0 { "flood".to_string() } else { format!("{} hops via {}", c.path_len, hex::encode(&c.out_path)) }),
+            format!("  path      {}", contacts::route_text(c)),
         ];
         for l in lines {
             self.notice(self.active, &l);
@@ -1336,7 +1336,8 @@ impl App {
                         PayloadType::TextMsg => PktKind::Direct,
                         _ => return,
                     };
-                    if h.path_len >= 1 && !self.pending_sends.is_empty() {
+                    // low 6 bits = hop count; the top 2 carry the path hash size
+                    if h.path_len & 0x3f >= 1 && !self.pending_sends.is_empty() {
                         self.heard.push(HeardPacket { kind, payload_len: log.payload.len(), at: Instant::now() });
                     }
                 }

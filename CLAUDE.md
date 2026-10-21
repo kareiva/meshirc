@@ -69,7 +69,7 @@ These come from the MeshCore companion protocol and from reading `meshcore-rs` s
 - **Repeat detection without crypto.** The firmware pushes every received packet
   as `LogData` (before dedup) but never our own TX, and never delivers repeats
   of our own packets as messages (they are marked seen at send). So a
-  `GroupText`/`TextMsg` `LogData` with `path_len >= 1` whose payload size equals
+  `GroupText`/`TextMsg` `LogData` with a hop count (`path_len & 0x3f`) `>= 1` whose payload size equals
   our recent send (`channel_payload_len` / `direct_payload_len` in `app.rs`) and
   that is *not* followed within 1.5 s by a `ChannelMsgRecv`/`ContactMsgRecv`
   is treated as "repeat heard". Do **not** decrypt packets in the client —
@@ -79,7 +79,7 @@ These come from the MeshCore companion protocol and from reading `meshcore-rs` s
 - **Traces.** meshcore-rs 0.2 has no trace call and its `TraceData` parser doesn't match the
   firmware layout, so `radio::trace` sends `CMD_SEND_TRACE_PATH` (36) raw and reads the result
   from the trace packet's `LogData` (header path = one SNR byte per hop, payload starts with our tag).
-  `Contact.path_len` packs hop count (low 6 bits) and hash size − 1 (top 2 bits); `0xff` = flood.
+  `Contact.path_len` (and the packet header's `path_len`) packs hop count (low 6 bits) and hash size − 1 (top 2 bits); `0xff` = flood. Decode with `contacts::route` / `route_text`, never print it raw.
 - **meshcore-rs `send()` ignores error frames.** Calls that wait for `Ok` (e.g. `remove_contact`)
   turn a firmware `Err` reply into a 5 s timeout. `radio::remove_contact` races the call against
   `EventType::Error` to get the code (`2` = not found). Contacts that arrive via a `NEW_ADVERT`
