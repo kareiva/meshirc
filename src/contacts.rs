@@ -41,6 +41,10 @@ impl ContactBook {
         self.by_key.insert(c.public_key, c);
     }
 
+    pub fn remove(&mut self, key: &[u8; 32]) -> Option<Contact> {
+        self.by_key.remove(key)
+    }
+
     pub fn replace_all(&mut self, list: Vec<Contact>) {
         self.by_key.clear();
         for c in list {

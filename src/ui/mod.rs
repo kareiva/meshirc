@@ -6,7 +6,7 @@ use crate::app::{App, Focus};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -29,6 +29,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     statusbar::draw_bottom(f, app, rows[2]);
     draw_input(f, app, rows[3]);
     draw_mentions(f, app, cols[0], rows[3]);
+    draw_confirm_remove(f, app, rows[1]);
+}
+
+/// "Remove <name> from the contact list? [y/N]" dialog, centred over the chat + sidebar.
+fn draw_confirm_remove(f: &mut Frame, app: &App, area: Rect) {
+    let Some(name) = app.confirm_remove.and_then(|k| app.contacts.by_prefix(&k)).map(|c| c.adv_name.clone()) else { return };
+    let text = vec![
+        Line::from(vec![Span::raw("Remove "), Span::styled(name, Style::default().fg(Color::Yellow)), Span::raw(" from the contact list?")]),
+        Line::from(""),
+        Line::from(vec![Span::styled("y", Style::default().fg(Color::Green)), Span::raw(" remove   any other key: cancel")]),
+    ];
+    let width = (text.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4).min(area.width);
+    let height = 5.min(area.height);
+    let popup = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" Remove contact ");
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), popup);
 }
 
 const MENTION_ROWS: usize = 8;
@@ -156,5 +176,15 @@ mod tests {
         assert_eq!(buf[(12, 7)].bg, Color::Cyan, "selected row highlighted");
         assert_eq!(buf[(12, 6)].bg, Color::DarkGray);
         assert!(row(9).starts_with("[status] hi @al"), "{:?}", row(9));
+
+        let mut bob = [0u8; 32];
+        bob[0] = 3;
+        app.confirm_remove = Some(bob);
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let screen: Vec<String> = (0..12).map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        assert!(screen.iter().any(|r| r.contains("Remove contact")), "{screen:#?}");
+        assert!(screen.iter().any(|r| r.contains("Remove Bob from the contact list?")), "{screen:#?}");
     }
 }

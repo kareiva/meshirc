@@ -1,6 +1,6 @@
 use crate::event::{AppEvent, RadioCmd, RadioReply};
 use futures::StreamExt;
-use meshcore_rs::events::{EventDispatcher, EventPayload};
+use meshcore_rs::events::{Contact, EventDispatcher, EventPayload};
 use meshcore_rs::{BinaryReqType, EventType, MeshCore, PayloadType};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -157,6 +157,21 @@ async fn handle_cmd(cmd: RadioCmd, cmds: &Cmds, dispatcher: &Arc<EventDispatcher
             Ok(list) => reply(tx, RadioReply::Contacts(list)).await,
             Err(e) => reply(tx, RadioReply::Error(format!("get_contacts: {e}"))).await,
         },
+        RadioCmd::RemoveContact { contact } => {
+            let name = contact.adv_name.clone();
+            let removed = RadioReply::ContactRemoved { key: contact.public_key, name: name.clone() };
+            match remove_contact(cmds, dispatcher, &contact).await {
+                Ok(()) => reply(tx, removed).await,
+                // Heard via a NEW_ADVERT push but never stored (radio not auto-adding): nothing to
+                // delete on the radio, so just drop it from the list.
+                Err(Some(ERR_CODE_NOT_FOUND)) => {
+                    reply(tx, RadioReply::Notice { window: None, text: format!("{name} was not stored on the radio") }).await;
+                    reply(tx, removed).await;
+                }
+                Err(Some(code)) => reply(tx, RadioReply::Error(format!("remove {name}: radio error code {code}"))).await,
+                Err(None) => reply(tx, RadioReply::Error(format!("remove {name}: no reply from radio"))).await,
+            }
+        }
         RadioCmd::Advert { flood } => match cmds.lock().await.send_advert(flood).await {
             Ok(_) => reply(tx, RadioReply::Notice { window: None, text: if flood { "flood advert sent".into() } else { "advert sent".into() } }).await,
             Err(e) => reply(tx, RadioReply::Error(format!("advert: {e}"))).await,
@@ -195,6 +210,29 @@ async fn cli_command(cmds: &Cmds, text: &str) -> anyhow::Result<String> {
         }
         EventPayload::Bytes(b) => anyhow::bail!("unexpected frame {:02x?}", b.first()),
         other => anyhow::bail!("{other:?}"),
+    }
+}
+
+/// Firmware `ERR_CODE_NOT_FOUND`: e.g. `CMD_REMOVE_CONTACT` for a key not in the contact table.
+const ERR_CODE_NOT_FOUND: u8 = 2;
+
+/// `remove_contact`, but also listening for the firmware's error frame: meshcore-rs only waits for
+/// `Ok`, so an `Err` reply would otherwise surface as a 5 s timeout. `Err(Some(code))` carries the
+/// firmware error code, `Err(None)` means no answer at all.
+async fn remove_contact(cmds: &Cmds, dispatcher: &EventDispatcher, contact: &Contact) -> Result<(), Option<u8>> {
+    let error = dispatcher.wait_for_event(Some(EventType::Error), HashMap::new(), Duration::from_secs(6));
+    let remove = async { cmds.lock().await.remove_contact(contact).await };
+    tokio::select! {
+        // biased: poll the error waiter first so it subscribes before the command goes out
+        biased;
+        ev = error => match ev.map(|e| e.payload) {
+            Some(EventPayload::String(s)) => Err(Some(s.bytes().next().unwrap_or(0))),
+            _ => Err(None),
+        },
+        r = remove => r.map_err(|e| {
+            warn!("remove_contact: {e}");
+            None
+        }),
     }
 }
 
