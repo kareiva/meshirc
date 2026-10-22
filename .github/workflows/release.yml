@@ -67,9 +67,41 @@ jobs:
           name: meshirc-${{ matrix.target }}
           path: dist/*.${{ matrix.archive }}
 
+  freebsd:
+    name: x86_64-unknown-freebsd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # GitHub has no FreeBSD runners: build natively in a FreeBSD 15.1-RELEASE VM.
+      # The workspace is synced into the VM and copied back afterwards.
+      - name: Build in FreeBSD 15.1 VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          usesh: true
+          prepare: |
+            pkg install -y curl
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            freebsd-version
+            cargo build --release --locked
+      - name: Package
+        run: |
+          set -e
+          name="meshirc-${GITHUB_REF_NAME}-x86_64-unknown-freebsd"
+          mkdir -p dist/"$name"
+          cp README.md target/release/meshirc dist/"$name"/
+          (cd dist && tar czf "$name.tar.gz" "$name")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshirc-x86_64-unknown-freebsd
+          path: dist/*.tar.gz
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, freebsd]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
