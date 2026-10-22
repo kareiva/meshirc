@@ -100,6 +100,23 @@ async fn handle_cmd(cmd: RadioCmd, cmds: &Cmds, dispatcher: &Arc<EventDispatcher
                 Err(e) => reply(tx, RadioReply::SendFailed { window, line, error: format!("send to {}: {e}", contact.adv_name) }).await,
             }
         }
+        RadioCmd::SendCommand { contact, text, window, line } => match send_cli(cmds, &contact, &text).await {
+            Ok(()) => reply(tx, RadioReply::CommandSent { window, line, prefix: contact.prefix() }).await,
+            Err(e) => reply(tx, RadioReply::SendFailed { window, line, error: format!("command to {}: {e}", contact.adv_name) }).await,
+        },
+        RadioCmd::Login { contact, password, window } => {
+            let cmds = cmds.clone();
+            let dispatcher = dispatcher.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let name = contact.adv_name.clone();
+                let r = match login(&cmds, &dispatcher, &contact, &password).await {
+                    Ok(ok) => RadioReply::Login { window, key: contact.public_key, name, ok },
+                    Err(e) => RadioReply::Error(format!("login {name}: {e}")),
+                };
+                reply(&tx, r).await;
+            });
+        }
         RadioCmd::SendChannel { idx, text, window, line } => {
             match cmds.lock().await.send_channel_msg(idx, &text, None).await {
                 Ok(()) => reply(tx, RadioReply::ChannelSent { window, line }).await,
@@ -211,6 +228,52 @@ async fn cli_command(cmds: &Cmds, text: &str) -> anyhow::Result<String> {
         EventPayload::Bytes(b) => anyhow::bail!("unexpected frame {:02x?}", b.first()),
         other => anyhow::bail!("{other:?}"),
     }
+}
+
+/// `CMD_SEND_TXT_MSG` with `TXT_TYPE_CLI_DATA`: [2][txt_type=1][attempt][timestamp u32][prefix 6][text].
+/// meshcore-rs `send_msg` always sends `TXT_TYPE_PLAIN`; repeaters only execute CLI-data text,
+/// and only from a logged-in admin. No ACK comes back (`expected_ack` is 0).
+const CMD_SEND_TXT_MSG: u8 = 2;
+const TXT_TYPE_CLI_DATA: u8 = 1;
+
+async fn send_cli(cmds: &Cmds, contact: &Contact, text: &str) -> anyhow::Result<()> {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0);
+    let mut data = vec![CMD_SEND_TXT_MSG, TXT_TYPE_CLI_DATA, 0];
+    data.extend_from_slice(&ts.to_le_bytes());
+    data.extend_from_slice(&contact.prefix());
+    data.extend_from_slice(text.as_bytes());
+    let ev = cmds
+        .lock()
+        .await
+        .send_multi(&data, &[EventType::MsgSent, EventType::Error], Duration::from_secs(10))
+        .await?;
+    match ev.payload {
+        EventPayload::MsgSent(_) => Ok(()),
+        EventPayload::String(e) => anyhow::bail!("radio error code {}", e.bytes().next().unwrap_or(0)),
+        other => anyhow::bail!("{other:?}"),
+    }
+}
+
+/// `send_login`, then wait for the `LoginSuccess` / `LoginFailed` push (meshcore-rs drops its
+/// payload, so it can't be matched to the node; logins are one at a time in practice).
+async fn login(cmds: &Cmds, dispatcher: &EventDispatcher, contact: &Contact, password: &str) -> anyhow::Result<Option<bool>> {
+    let mut events = dispatcher.receiver();
+    let info = cmds.lock().await.send_login(contact, password).await?;
+    let timeout = Duration::from_millis(info.suggested_timeout as u64).max(Duration::from_secs(5)) + Duration::from_secs(5);
+    info!("login {}: sent, waiting {timeout:?} (suggested {} ms)", contact.adv_name, info.suggested_timeout);
+    let wait = async {
+        loop {
+            match events.recv().await {
+                Ok(ev) if ev.event_type == EventType::LoginSuccess => return Some(true),
+                Ok(ev) if ev.event_type == EventType::LoginFailed => return Some(false),
+                Ok(_) | Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return None,
+            }
+        }
+    };
+    let r = tokio::time::timeout(timeout, wait).await.ok().flatten();
+    info!("login {}: {r:?}", contact.adv_name);
+    Ok(r)
 }
 
 /// Firmware `ERR_CODE_NOT_FOUND`: e.g. `CMD_REMOVE_CONTACT` for a key not in the contact table.

@@ -1,8 +1,6 @@
 name: ci
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
 
 jobs:
@@ -16,3 +14,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
+
+  freebsd:
+    name: test (freebsd-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No FreeBSD runners on GitHub: run the tests in a VM. Without `release`, the action
+      # uses its default image, which tracks the newest FreeBSD release.
+      - name: Test in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg install -y curl
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            freebsd-version
+            cargo test --locked

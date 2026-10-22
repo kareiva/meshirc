@@ -69,7 +69,7 @@ These come from the MeshCore companion protocol and from reading `meshcore-rs` s
 - **Repeat detection without crypto.** The firmware pushes every received packet
   as `LogData` (before dedup) but never our own TX, and never delivers repeats
   of our own packets as messages (they are marked seen at send). So a
-  `GroupText`/`TextMsg` `LogData` with `path_len >= 1` whose payload size equals
+  `GroupText`/`TextMsg` `LogData` with a hop count (`path_len & 0x3f`) `>= 1` whose payload size equals
   our recent send (`channel_payload_len` / `direct_payload_len` in `app.rs`) and
   that is *not* followed within 1.5 s by a `ChannelMsgRecv`/`ContactMsgRecv`
   is treated as "repeat heard". Do **not** decrypt packets in the client —
@@ -79,12 +79,19 @@ These come from the MeshCore companion protocol and from reading `meshcore-rs` s
 - **Traces.** meshcore-rs 0.2 has no trace call and its `TraceData` parser doesn't match the
   firmware layout, so `radio::trace` sends `CMD_SEND_TRACE_PATH` (36) raw and reads the result
   from the trace packet's `LogData` (header path = one SNR byte per hop, payload starts with our tag).
-  `Contact.path_len` packs hop count (low 6 bits) and hash size − 1 (top 2 bits); `0xff` = flood.
+  `Contact.path_len` (and the packet header's `path_len`) packs hop count (low 6 bits) and hash size − 1 (top 2 bits); `0xff` = flood. Decode with `contacts::route` / `route_text`, never print it raw.
 - **meshcore-rs `send()` ignores error frames.** Calls that wait for `Ok` (e.g. `remove_contact`)
   turn a firmware `Err` reply into a 5 s timeout. `radio::remove_contact` races the call against
   `EventType::Error` to get the code (`2` = not found). Contacts that arrive via a `NEW_ADVERT`
   push (`NewContact`) may not be stored on the radio (manual-add mode), so "not found" on remove
   just drops them from the sidebar.
+- **Repeater remote control.** Every DM to a repeater (`contact_type` 2) is a CLI command:
+  `CMD_SEND_TXT_MSG` with `txt_type = 1` (CLI data), sent raw by `radio::send_cli` because
+  meshcore-rs `send_msg` always uses `txt_type = 0`. Repeaters run it only for a logged-in admin
+  (`/login`), send no ACK, and answer with a `ContactMsgRecv` of `txt_type = 1`; that reply marks
+  the oldest pending command to the node acked (`App::pending_cmds`) and is split into one line per
+  `\n`. meshcore-rs drops the `LoginSuccess`/`LoginFailed` payload, so a login reply can't be
+  matched to its node — fine while logins are one at a time.
 - **Text limit** is 160 bytes per message. Reject or split longer input.
 - **`send_msg` needs a `Contact`** (or 6-byte pubkey prefix) — never a name.
 
@@ -249,6 +256,7 @@ match ev.payload {
 | `/whois [who]` | Print cached fields. `who` may be omitted in a query window (targets that node). |
 | `/status [who]` | `send_binary_req(Status)` async; print result in the issuing window. `who` optional in a query window. |
 | `/trace [who]` | Round-trip trace along the contact's learned `out_path` (`a b C b a` for repeaters/rooms; `a b b a` for chat nodes, which don't relay traces). Prints per-hop SNR. `who` optional in a query window. Flood-routed contacts (no path) → error. |
+| `/login [who] <password>` | `send_login`, then wait for the `LoginSuccess`/`LoginFailed` push. `/login <who> <pw>` works anywhere (password = last word, names may contain spaces; in a repeater/room window only if `<who>` resolves to a repeater/room); in a repeater/room private window a bare `/login <pw>` targets that node. Repeaters send no reply to a wrong password, so that shows as a timeout. Chat nodes refused. `/login` lines are kept out of input history. |
 | `/contacts` | Force `get_contacts(0)` refresh. |
 | `/advert` | `send_advert(false)` — local zero-hop advert. `/advert flood` for flood. |
 | `/win N`, `/close` | Window management. |
@@ -256,7 +264,7 @@ match ev.payload {
 | `/set [key [value]]` | Show/change session settings: `save_private on\|off`, `sidebar on\|off` (hide the contact list so terminal selection copies clean chat lines; `F2` toggles). Not persisted (config file does that). |
 | `/wipe [target]` | Delete history: active window (default), `<window>` by name, `channels`, `private`, `all`. Clears scrollback, drops the window's pending marks and deletes the log file(s), including logs of windows that are not open. No confirmation. |
 | `/help`, `/quit` | Obvious. |
-| plain text | Send to the active window: channel → `send_channel_msg`, query → `send_msg`, status → error. |
+| plain text | Send to the active window: channel → `send_channel_msg`, query → `send_msg` (repeater → remote-control CLI command, see below), status → error. |
 
 ## Keybindings
 

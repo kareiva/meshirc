@@ -152,17 +152,35 @@ pub struct TracePath {
     pub reaches_contact: bool,
 }
 
+/// Learned out path of `c` as `(hops, hash_size)`, or `None` for flood (no known route).
+/// `path_len` packs the hop count in the low 6 bits and hash size − 1 in the top 2 bits
+/// (0xff = flood), so it is not a hop count itself: `0x43` is 3 hops of 2-byte hashes.
+pub fn route(c: &Contact) -> Option<(usize, usize)> {
+    let b = c.path_len as u8;
+    (b != 0xff).then(|| ((b & 0x3f) as usize, (b >> 6) as usize + 1))
+}
+
+/// Human-readable out path for `/whois`: "flood", "direct" or "3 hops via 22e3 287e aabb".
+pub fn route_text(c: &Contact) -> String {
+    match route(c) {
+        None => "flood".into(),
+        Some((0, _)) => "direct".into(),
+        Some((hops, size)) => {
+            let path = c.out_path.get(..hops * size).unwrap_or(&c.out_path);
+            let hashes: Vec<String> = path.chunks(size).map(hex::encode).collect();
+            format!("{hops} hop{} via {}", if hops == 1 { "" } else { "s" }, hashes.join(" "))
+        }
+    }
+}
+
 /// Round-trip trace route to `c` from its learned out path: `a b C b a` for a repeater/room,
 /// `a b b a` for a chat node. `path_len` encodes the hop count in the low 6 bits and
 /// hash size − 1 in the top 2 (0xff = flood, no known route).
 pub fn trace_path(c: &Contact) -> Result<TracePath, String> {
     let name = &c.adv_name;
-    let b = c.path_len as u8;
-    if b == 0xff {
+    let Some((hops, hash_size)) = route(c) else {
         return Err(format!("no known route to {name} (flood); a trace needs a direct path, learned when they reply"));
-    }
-    let hops = (b & 0x3f) as usize;
-    let hash_size = (b >> 6) as usize + 1;
+    };
     let flags = match hash_size {
         1 => 0,
         2 => 1,
@@ -250,6 +268,14 @@ mod tests {
         c.out_path = vec![0xa1, 0xb2];
         let t = trace_path(&c).unwrap();
         assert_eq!((t.path, t.flags, t.reaches_contact), (vec![0xa1, 0xb2, 0xc3, 0xb2, 0xa1], 0, true));
+        c.path_len = 0x43;
+        c.out_path = vec![0x22, 0xe3, 0x28, 0x7e, 0xaa, 0xbb];
+        assert_eq!(route(&c), Some((3, 2)));
+        assert_eq!(route_text(&c), "3 hops via 22e3 287e aabb");
+        c.path_len = -1;
+        assert_eq!(route_text(&c), "flood");
+        c.path_len = 0;
+        assert_eq!(route_text(&c), "direct");
         // 2-byte hashes: top bits of path_len = 1
         c.path_len = 0x42;
         c.out_path = vec![0xa1, 0xa2, 0xb1, 0xb2];

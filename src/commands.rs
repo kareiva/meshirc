@@ -7,6 +7,8 @@ pub enum Command {
     Whois(Option<String>),
     Status(Option<String>),
     Trace(Option<String>),
+    /// `/login` argument as typed: `<password>` in a repeater's window, else `<who> <password>`.
+    Login(String),
     Contacts,
     Advert { flood: bool },
     Win(usize),
@@ -74,6 +76,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "whois" | "wi" => Command::Whois(opt(rest)),
         "status" | "st" => Command::Status(opt(rest)),
         "trace" | "tr" => Command::Trace(opt(rest)),
+        "login" => arg(Command::Login(rest.to_string())),
         "contacts" | "who" => Command::Contacts,
         "advert" => Command::Advert { flood: rest.eq_ignore_ascii_case("flood") },
         "win" | "window" | "w" => match rest.parse() {
@@ -117,6 +120,7 @@ pub const HELP: &[&str] = &[
     "/whois [who]       cached contact info (who defaults to the private window's node)",
     "/status [who]      request live status over the mesh (repeaters/rooms)",
     "/trace [who]       trace the route to a node and back, with per-hop SNR",
+    "/login [who] <pw>  log in to a repeater/room (who defaults to the private window's node)",
     "/contacts          refresh contact list from radio",
     "/advert [flood]    send self advertisement",
     "/win N  /close     switch / close window (also Alt+N, Ctrl+N/P)",
@@ -144,6 +148,8 @@ mod tests {
         assert_eq!(parse("/whois"), Some(Command::Whois(None)));
         assert_eq!(parse("/status Bob"), Some(Command::Status(Some("Bob".into()))));
         assert_eq!(parse("/trace"), Some(Command::Trace(None)));
+        assert_eq!(parse("/login Hill Top s3cret"), Some(Command::Login("Hill Top s3cret".into())));
+        assert!(matches!(parse("/login"), Some(Command::Unknown(_))));
         assert_eq!(parse("/trace LY2EN"), Some(Command::Trace(Some("LY2EN".into()))));
         assert_eq!(
             parse("/msg Bob hi there"),
